@@ -10,7 +10,7 @@ import { TEST_TEACHER, TEACHER_SESSION_KEY } from "@/lib/mockTeacher";
 const SITE_NAME = "GC RFID Attendance";
 
 const C = {
-  bg: "#f8faf8",
+  bg: "#ffffff",
   surface: "#ffffff",
   border: "#e8ece9",
   text: "#111827",
@@ -81,7 +81,7 @@ export default function LoginPage() {
   ];
 
   return (
-    <div className="min-h-screen grid lg:grid-cols-[1.05fr_1fr]" style={{ background: C.bg, fontFamily: "'Poppins', system-ui, sans-serif" }}>
+    <div className="min-h-screen grid lg:grid-cols-2" style={{ background: C.bg, fontFamily: "'Poppins', system-ui, sans-serif" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap');
         .gc-field { background: ${C.surface}; border: 1px solid ${C.border}; color: ${C.text}; transition: border-color .15s, box-shadow .15s; }
@@ -91,66 +91,66 @@ export default function LoginPage() {
         .gc-submit:focus-visible, .gc-role:focus-visible, .gc-back:focus-visible { outline: 2px solid ${C.green}; outline-offset: 3px; }
         .gc-back { color: ${C.muted}; transition: color .15s; }
         .gc-back:hover { color: ${C.green}; }
-        .gc-dots { background-image: radial-gradient(rgba(34,197,94,.28) 1.5px, transparent 1.5px); background-size: 28px 28px; }
+        .gc-dots { background-image: radial-gradient(rgba(34,197,94,.16) 1.2px, transparent 1.2px); background-size: 28px 28px; }
         .gc-auth-card { animation: auth-enter .55s cubic-bezier(.2,.8,.2,1) both; box-shadow: 0 24px 70px rgba(16,35,26,.09), 0 2px 6px rgba(16,35,26,.03); }
         .gc-brand-content { animation: auth-enter .7s cubic-bezier(.2,.8,.2,1) both; }
         .gc-role { transition: background .2s, color .2s, transform .2s, box-shadow .2s; }
         .gc-role:hover { transform: translateY(-1px); }
         .gc-field:focus { outline: none; }
-        .gc-decor { position:absolute; border:1px solid rgba(74,222,128,.15); border-radius:9999px; pointer-events:none; }
+        .gc-decor { position:absolute; border:1px solid rgba(22,163,74,.1); border-radius:9999px; pointer-events:none; }
         @keyframes auth-enter { from { opacity:0; transform:translateY(18px); } to { opacity:1; transform:translateY(0); } }
         @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration:.01ms !important; animation-iteration-count:1 !important; transition-duration:.01ms !important; } }
       `}</style>
 
       {/* ========================= BRAND PANEL (desktop) ========================= */}
-      <aside className="hidden lg:flex relative flex-col justify-between p-12 overflow-hidden" style={{ background: C.ink }}>
+      <aside className="hidden lg:flex relative flex-col justify-between px-10 xl:px-16 py-10 xl:py-12 overflow-hidden border-r" style={{ background: C.surface, borderColor: C.border }}>
         <div className="gc-decor w-[32rem] h-[32rem] -right-52 -top-32" aria-hidden="true" />
         <div className="gc-decor w-[24rem] h-[24rem] -right-28 -top-0" aria-hidden="true" />
-        <div className="absolute -left-32 bottom-10 w-80 h-80 rounded-full blur-3xl opacity-20" style={{ background: "#22c55e" }} aria-hidden="true" />
-        <div className="gc-dots absolute inset-0 opacity-60" aria-hidden="true" />
-        <div className="relative flex items-center gap-3">
+        <div className="absolute -left-32 bottom-10 w-80 h-80 rounded-full blur-3xl opacity-10" style={{ background: "#22c55e" }} aria-hidden="true" />
+        <div className="gc-dots absolute inset-0 opacity-50" aria-hidden="true" />
+        <div className="relative mx-auto w-full max-w-[38rem] flex items-center gap-3">
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/gclogo.png" alt="Gordon College logo" className="w-10 h-10 rounded-full object-contain" />
-          <span className="text-sm font-bold text-white tracking-tight">{SITE_NAME}</span>
+          <img src="/gclogo.png" alt="Gordon College logo" className="w-12 h-12 rounded-full object-contain" />
+          <span className="text-base font-bold tracking-tight" style={{ color: C.text }}>{SITE_NAME}</span>
         </div>
 
-        <div className="relative max-w-md gc-brand-content">
-          <div className="inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold mb-6" style={{ color: "#bbf7d0", background: "rgba(74,222,128,.1)", border: "1px solid rgba(74,222,128,.18)" }}>
-            <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" /> Attendance, made simple
+        <div className="relative mx-auto w-full max-w-[38rem] gc-brand-content">
+          <div className="inline-flex items-center gap-2 rounded-full px-4 py-2 text-sm font-semibold mb-6" style={{ color: C.greenDark, background: C.greenSoft, border: `1px solid ${C.greenEdge}` }}>
+            <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: C.green }} /> Attendance, made simple
           </div>
-          <h1 className="text-5xl font-extrabold leading-[1.05] tracking-tight text-white">
+          <h1 className="text-5xl xl:text-6xl 2xl:text-7xl font-extrabold leading-[1.05] tracking-tight" style={{ color: C.text }}>
             Welcome back.
             <br />
-            <span style={{ color: "#4ade80" }}>Let&apos;s check who tapped in.</span>
+            <span style={{ color: C.green }}>Let&apos;s check who tapped in.</span>
           </h1>
-          <ul className="mt-10 space-y-4">
+          <ul className="mt-8 xl:mt-10 space-y-4 xl:space-y-5">
             {points.map(p => {
               const Icon = p.icon;
               return (
-                <li key={p.text} className="flex items-center gap-3 text-sm" style={{ color: "rgba(255,255,255,.8)" }}>
+                <li key={p.text} className="flex items-center gap-4 text-base xl:text-lg" style={{ color: C.muted }}>
                   <span
-                    className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0"
-                    style={{ background: "rgba(74,222,128,.14)" }}
+                    className="w-11 h-11 rounded-xl flex items-center justify-center shrink-0"
+                    style={{ background: C.greenSoft }}
                   >
-                    <Icon className="w-4 h-4" style={{ color: "#4ade80" }} />
+                    <Icon className="w-5 h-5" style={{ color: C.green }} />
                   </span>
                   {p.text}
                 </li>
               );
             })}
           </ul>
-          <div className="mt-10 flex items-center gap-4 rounded-2xl p-4" style={{ background: "rgba(255,255,255,.07)", border: "1px solid rgba(255,255,255,.1)" }}>
-            <div className="w-11 h-11 rounded-xl flex items-center justify-center" style={{ color: "#4ade80", background: "rgba(74,222,128,.14)" }}>
-              <CreditCard className="w-5 h-5" />
+          <div className="mt-8 xl:mt-10 flex items-center gap-4 rounded-2xl p-5" style={{ background: C.greenSoft, border: `1px solid ${C.greenEdge}` }}>
+            <div className="w-12 h-12 rounded-xl flex items-center justify-center shrink-0" style={{ color: C.green, background: C.surface }}>
+              <CreditCard className="w-6 h-6" />
             </div>
             <div>
-              <p className="text-sm font-semibold text-white">One tap. One reliable record.</p>
-              <p className="text-xs mt-1" style={{ color: "rgba(255,255,255,.6)" }}>Your attendance workspace, ready when you are.</p>
+              <p className="text-base font-semibold" style={{ color: C.text }}>One tap. One reliable record.</p>
+              <p className="text-sm mt-1" style={{ color: C.muted }}>Your attendance workspace, ready when you are.</p>
             </div>
           </div>
         </div>
 
-        <p className="relative text-xs" style={{ color: "rgba(255,255,255,.55)" }}>
+        <p className="relative mx-auto w-full max-w-[38rem] text-sm" style={{ color: C.muted }}>
           RFID-Based Student Attendance Monitoring &middot; Gordon College
         </p>
       </aside>
