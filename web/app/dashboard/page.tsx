@@ -31,12 +31,12 @@ export default function DashboardPage() {
       type: "doughnut",
       data: {
         labels: ["Authorized", "Unauthorized"],
-        datasets: [{ data: [stats.authorizedCount, stats.unauthorizedCount], backgroundColor: ["#22c55e", "#ef4444"], borderWidth: 0, hoverOffset: 8 }],
+        datasets: [{ data: [stats.authorizedCount, stats.unauthorizedCount], backgroundColor: ["#16a34a", "#ef4444"], borderWidth: 0, hoverOffset: 8 }],
       },
       options: {
         cutout: "72%", responsive: true, maintainAspectRatio: true,
         plugins: {
-          legend: { position: "bottom", labels: { color: "#8892b0", padding: 16, font: { size: 12 } } },
+          legend: { position: "bottom", labels: { color: "#4b7a5e", padding: 16, font: { size: 12 } } },
           tooltip: { callbacks: { label: c => ` ${c.label}: ${c.parsed}` } },
         },
       },
@@ -73,7 +73,7 @@ export default function DashboardPage() {
       data: {
         labels,
         datasets: [
-          { label: "Authorized",   data: auth,   borderColor: "#22c55e", backgroundColor: "rgba(34,197,94,.08)",  fill: true, tension: 0.4, pointBackgroundColor: "#22c55e", pointRadius: 4 },
+          { label: "Authorized",   data: auth,   borderColor: "#16a34a", backgroundColor: "rgba(22,163,74,.08)",  fill: true, tension: 0.4, pointBackgroundColor: "#16a34a", pointRadius: 4 },
           { label: "Unauthorized", data: unauth, borderColor: "#ef4444", backgroundColor: "rgba(239,68,68,.08)", fill: true, tension: 0.4, pointBackgroundColor: "#ef4444", pointRadius: 4 },
         ],
       },
@@ -81,10 +81,10 @@ export default function DashboardPage() {
         responsive: true, maintainAspectRatio: false,
         interaction: { mode: "index", intersect: false },
         scales: {
-          x: { grid: { color: "rgba(46,50,80,.5)" }, ticks: { color: "#8892b0" } },
-          y: { beginAtZero: true, grid: { color: "rgba(46,50,80,.5)" }, ticks: { color: "#8892b0", stepSize: 1 } },
+          x: { grid: { color: "rgba(187,247,208,.5)" }, ticks: { color: "#4b7a5e" } },
+          y: { beginAtZero: true, grid: { color: "rgba(187,247,208,.5)" }, ticks: { color: "#4b7a5e", stepSize: 1 } },
         },
-        plugins: { legend: { labels: { color: "#8892b0" } } },
+        plugins: { legend: { labels: { color: "#4b7a5e" } } },
       },
     });
     return () => lineChart.current?.destroy();
@@ -92,7 +92,7 @@ export default function DashboardPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-xl font-bold">Dashboard</h1>
+      <h1 className="text-xl font-bold" style={{ color: "var(--text-main)" }}>Dashboard</h1>
 
       {/* Stats */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -106,13 +106,20 @@ export default function DashboardPage() {
       <div className="grid grid-cols-1 lg:grid-cols-[300px_1fr] gap-4">
         {/* Donut */}
         <Card>
-          <CardHeader title="Access Overview" badge={<span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "rgba(79,142,247,.12)", color: "#4f8ef7" }}>All Time</span>} />
+          <CardHeader
+            title="Access Overview"
+            badge={
+              <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "rgba(22,163,74,.10)", color: "#15803d" }}>
+                All Time
+              </span>
+            }
+          />
           <CardBody>
             <div className="relative flex items-center justify-center" style={{ height: 220 }}>
               <canvas ref={donutRef} />
               <div className="absolute flex flex-col items-center pointer-events-none">
-                <span className="text-2xl font-bold">{total}</span>
-                <span className="text-xs" style={{ color: "#8892b0" }}>Total</span>
+                <span className="text-2xl font-bold" style={{ color: "var(--text-main)" }}>{total}</span>
+                <span className="text-xs" style={{ color: "var(--text-muted)" }}>Total</span>
               </div>
             </div>
           </CardBody>
@@ -133,27 +140,34 @@ export default function DashboardPage() {
       <Card>
         <CardHeader
           title="Recent Activity"
-          badge={<span className="text-xs px-2 py-0.5 rounded-full animate-pulse" style={{ background: "rgba(34,197,94,.12)", color: "#22c55e" }}>Live</span>}
+          badge={
+            <span className="text-xs px-2 py-0.5 rounded-full animate-pulse" style={{ background: "rgba(22,163,74,.12)", color: "#15803d" }}>
+              Live
+            </span>
+          }
         />
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead style={{ background: "var(--bg-card2)" }}>
               <tr>
                 {["Status", "UID", "Cardholder", "Device", "Time"].map(h => (
-                  <th key={h} className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider" style={{ color: "#8892b0" }}>{h}</th>
+                  <th key={h} className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>{h}</th>
                 ))}
               </tr>
             </thead>
             <tbody>
               {recentLogs.length === 0 ? (
-                <tr><td colSpan={5} className="px-4 py-10 text-center text-sm" style={{ color: "#8892b0" }}>No scans yet</td></tr>
+                <tr><td colSpan={5} className="px-4 py-10 text-center text-sm" style={{ color: "var(--text-muted)" }}>No scans yet</td></tr>
               ) : recentLogs.map(log => (
-                <tr key={log.key} className="hover:bg-[#22263a] transition-colors" style={{ borderBottom: "1px solid var(--border)" }}>
+                <tr key={log.key} className="transition-colors" style={{ borderBottom: "1px solid var(--border)" }}
+                  onMouseEnter={e => (e.currentTarget.style.background = "#f0fdf4")}
+                  onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
+                >
                   <td className="px-4 py-3"><AccessBadge authorized={log.authorized} /></td>
-                  <td className="px-4 py-3"><code className="text-xs" style={{ color: "#8892b0" }}>{log.uid}</code></td>
-                  <td className="px-4 py-3">{log.name || "Unknown"}</td>
-                  <td className="px-4 py-3 text-sm" style={{ color: "#8892b0" }}>{log.deviceName || log.deviceId}</td>
-                  <td className="px-4 py-3 text-xs" style={{ color: "#8892b0" }}>{formatTime(log.timestamp)}</td>
+                  <td className="px-4 py-3"><code className="text-xs" style={{ color: "var(--text-muted)" }}>{log.uid}</code></td>
+                  <td className="px-4 py-3" style={{ color: "var(--text-main)" }}>{log.name || "Unknown"}</td>
+                  <td className="px-4 py-3 text-sm" style={{ color: "var(--text-muted)" }}>{log.deviceName || log.deviceId}</td>
+                  <td className="px-4 py-3 text-xs" style={{ color: "var(--text-muted)" }}>{formatTime(log.timestamp)}</td>
                 </tr>
               ))}
             </tbody>

@@ -1,15 +1,18 @@
 @import "tailwindcss";
 
 :root {
-  --bg:        #0f1117;
-  --bg-card:   #1a1d27;
-  --bg-card2:  #22263a;
-  --border:    #2e3250;
-  --primary:   #4f8ef7;
+  --bg:        #f0fdf4;
+  --bg-card:   #ffffff;
+  --bg-card2:  #f0fdf4;
+  --border:    #bbf7d0;
+  --primary:   #16a34a;
+  --primary-hover: #15803d;
   --green:     #22c55e;
   --red:       #ef4444;
   --yellow:    #f59e0b;
   --purple:    #a855f7;
+  --text-main: #14532d;
+  --text-muted: #4b7a5e;
 }
 
 * { box-sizing: border-box; }
@@ -18,7 +21,7 @@ html { scroll-behavior: smooth; }
 
 body {
   background: var(--bg);
-  color: #e2e8f0;
+  color: var(--text-main);
   font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
   line-height: 1.6;
 }
@@ -26,7 +29,7 @@ body {
 /* Custom scrollbar */
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb { background: #86efac; border-radius: 3px; }
 
 /* Pulse animation */
 @keyframes pulse-dot {

@@ -21,12 +21,12 @@ export default function DeviceMonitoringPage() {
 
   return (
     <div className="space-y-5">
-      <h1 className="text-xl font-bold">Device Monitor</h1>
+      <h1 className="text-xl font-bold" style={{ color: "var(--text-main)" }}>Device Monitor</h1>
 
       {/* Device cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-4">
         {devices.length === 0 ? (
-          <div className="col-span-full flex flex-col items-center py-16 text-center" style={{ color: "#8892b0" }}>
+          <div className="col-span-full flex flex-col items-center py-16 text-center" style={{ color: "var(--text-muted)" }}>
             <Cpu className="w-12 h-12 mb-4 opacity-20" />
             <p>No devices found. Make sure your ESP32 is running and connected to Firebase.</p>
           </div>
@@ -40,17 +40,17 @@ export default function DeviceMonitoringPage() {
               style={{
                 background: "var(--bg-card)",
                 border: `1px solid var(--border)`,
-                borderTop: `3px solid ${online ? "#22c55e" : "#ef4444"}`,
+                borderTop: `3px solid ${online ? "#16a34a" : "#ef4444"}`,
               }}
             >
               <div className="flex items-start justify-between mb-4">
-                <div className="w-11 h-11 rounded-xl flex items-center justify-center" style={{ background: "rgba(79,142,247,.12)" }}>
-                  <Cpu className="w-6 h-6 text-blue-400" />
+                <div className="w-11 h-11 rounded-xl flex items-center justify-center" style={{ background: "rgba(22,163,74,.10)" }}>
+                  <Cpu className="w-6 h-6" style={{ color: "#15803d" }} />
                 </div>
                 <OnlineBadge online={online} />
               </div>
-              <div className="font-semibold text-base">{device.deviceName || device.deviceId}</div>
-              <div className="text-xs mt-0.5 mb-4" style={{ color: "#8892b0" }}>{device.deviceId}</div>
+              <div className="font-semibold text-base" style={{ color: "var(--text-main)" }}>{device.deviceName || device.deviceId}</div>
+              <div className="text-xs mt-0.5 mb-4" style={{ color: "var(--text-muted)" }}>{device.deviceId}</div>
               <div className="grid grid-cols-2 gap-2">
                 <InfoTile label="IP Address"  value={device.ip    || "—"} />
                 <InfoTile label="WiFi Signal" value={device.rssi ? `${device.rssi} dBm` : "—"} />
@@ -68,7 +68,11 @@ export default function DeviceMonitoringPage() {
           <CardHeader
             title={selected.deviceName || selected.deviceId}
             action={
-              <button onClick={() => setSelectedId(null)} className="text-xs px-3 py-1 rounded-lg" style={{ border: "1px solid var(--border)", color: "#8892b0" }}>
+              <button
+                onClick={() => setSelectedId(null)}
+                className="text-xs px-3 py-1 rounded-lg transition-colors hover:bg-green-50"
+                style={{ border: "1px solid var(--border)", color: "var(--text-muted)" }}
+              >
                 Close
               </button>
             }
@@ -86,8 +90,8 @@ export default function DeviceMonitoringPage() {
                 { label: "Last Scan",    value: formatTime(selected.lastScan) },
               ].map(({ label, value }) => (
                 <div key={label} className="rounded-lg p-3" style={{ background: "var(--bg-card2)" }}>
-                  <div className="text-xs mb-1" style={{ color: "#8892b0" }}>{label}</div>
-                  <div className="text-sm font-semibold break-all">{value}</div>
+                  <div className="text-xs mb-1" style={{ color: "var(--text-muted)" }}>{label}</div>
+                  <div className="text-sm font-semibold break-all" style={{ color: "var(--text-main)" }}>{value}</div>
                 </div>
               ))}
             </div>
@@ -101,8 +105,8 @@ export default function DeviceMonitoringPage() {
 function InfoTile({ label, value }: { label: string; value: string }) {
   return (
     <div className="rounded-lg p-2.5" style={{ background: "var(--bg-card2)" }}>
-      <div className="text-xs" style={{ color: "#8892b0" }}>{label}</div>
-      <div className="text-xs font-semibold mt-0.5 truncate">{value}</div>
+      <div className="text-xs" style={{ color: "var(--text-muted)" }}>{label}</div>
+      <div className="text-xs font-semibold mt-0.5 truncate" style={{ color: "var(--text-main)" }}>{value}</div>
     </div>
   );
 }

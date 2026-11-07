@@ -12,7 +12,7 @@ export function Card({ children, className = "", danger = false }: CardProps) {
       className={`rounded-xl overflow-hidden ${className}`}
       style={{
         background: "var(--bg-card)",
-        border: `1px solid ${danger ? "rgba(239,68,68,.3)" : "var(--border)"}`,
+        border: `1px solid ${danger ? "rgba(239,68,68,.4)" : "var(--border)"}`,
       }}
     >
       {children}
@@ -32,7 +32,7 @@ export function CardHeader({ title, badge, action }: CardHeaderProps) {
       className="flex items-center justify-between px-5 py-4"
       style={{ borderBottom: "1px solid var(--border)" }}
     >
-      <h3 className="font-semibold text-sm">{title}</h3>
+      <h3 className="font-semibold text-sm" style={{ color: "var(--text-main)" }}>{title}</h3>
       <div className="flex items-center gap-2">
         {badge}
         {action}

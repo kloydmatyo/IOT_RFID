@@ -6,12 +6,20 @@ import { db } from "@/lib/firebase";
 import type { RFIDCard, AccessLog, Device, Stats, SystemSettings } from "@/lib/types";
 
 // ── Stats ────────────────────────────────────────────────────────────────────
+// Derived live from /accessLogs so it always matches the actual log count.
 export function useStats() {
   const [stats, setStats] = useState<Stats>({ authorizedCount: 0, unauthorizedCount: 0 });
   useEffect(() => {
-    const r = ref(db, "/stats");
+    const r = ref(db, "/accessLogs");
     const unsub = onValue(r, (snap) => {
-      setStats(snap.val() ?? { authorizedCount: 0, unauthorizedCount: 0 });
+      let authorizedCount = 0;
+      let unauthorizedCount = 0;
+      snap.forEach((child) => {
+        const log = child.val();
+        if (log.authorized) authorizedCount++;
+        else unauthorizedCount++;
+      });
+      setStats({ authorizedCount, unauthorizedCount });
     });
     return () => off(r, "value", unsub);
   }, []);
@@ -46,7 +54,7 @@ export function useLogs(limit = 200) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const r = query(ref(db, "/accessLogs"), orderByChild("timestamp"), limitToLast(limit));
+    const r = query(ref(db, "/accessLogs"), limitToLast(limit));
     const unsub = onValue(r, (snap) => {
       const arr: AccessLog[] = [];
       snap.forEach((child) => {
@@ -63,7 +71,18 @@ export function useLogs(limit = 200) {
     await update(ref(db, "/stats"), { authorizedCount: 0, unauthorizedCount: 0 });
   }, []);
 
-  return { logs, loading, clearAll };
+  const recalculateStats = useCallback(async () => {
+    const snapshot = await get(ref(db, "/accessLogs"));
+    let authorized = 0, unauthorized = 0;
+    snapshot.forEach((child) => {
+      const log = child.val();
+      if (log.authorized) authorized++;
+      else unauthorized++;
+    });
+    await update(ref(db, "/stats"), { authorizedCount: authorized, unauthorizedCount: unauthorized });
+  }, []);
+
+  return { logs, loading, clearAll, recalculateStats };
 }
 
 // ── Recent Logs (last 10, live) ───────────────────────────────────────────────

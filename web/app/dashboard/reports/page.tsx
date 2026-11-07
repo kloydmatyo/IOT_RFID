@@ -10,10 +10,10 @@ Chart.register(...registerables);
 
 const CHART_OPTS = {
   scales: {
-    x: { grid: { color: "rgba(46,50,80,.5)" }, ticks: { color: "#8892b0", font: { size: 10 } } },
-    y: { beginAtZero: true, grid: { color: "rgba(46,50,80,.5)" }, ticks: { color: "#8892b0", stepSize: 1 } },
+    x: { grid: { color: "rgba(187,247,208,.5)" }, ticks: { color: "#4b7a5e", font: { size: 10 } } },
+    y: { beginAtZero: true, grid: { color: "rgba(187,247,208,.5)" }, ticks: { color: "#4b7a5e", stepSize: 1 } },
   },
-  plugins: { legend: { labels: { color: "#8892b0" } } },
+  plugins: { legend: { labels: { color: "#4b7a5e" } } },
 };
 
 export default function ReportsPage() {
@@ -42,11 +42,18 @@ export default function ReportsPage() {
       data: {
         labels: hours,
         datasets: [
-          { label: "Authorized",   data: auth,   backgroundColor: "rgba(34,197,94,.7)",  borderRadius: 4 },
+          { label: "Authorized",   data: auth,   backgroundColor: "rgba(22,163,74,.7)",  borderRadius: 4 },
           { label: "Unauthorized", data: unauth, backgroundColor: "rgba(239,68,68,.7)", borderRadius: 4 },
         ],
       },
-      options: { ...CHART_OPTS, responsive: true, maintainAspectRatio: false, scales: { ...CHART_OPTS.scales, x: { ...CHART_OPTS.scales.x, stacked: true }, y: { ...CHART_OPTS.scales.y, stacked: true } } },
+      options: {
+        ...CHART_OPTS, responsive: true, maintainAspectRatio: false,
+        scales: {
+          ...CHART_OPTS.scales,
+          x: { ...CHART_OPTS.scales.x, stacked: true },
+          y: { ...CHART_OPTS.scales.y, stacked: true },
+        },
+      },
     });
   }
 
@@ -59,12 +66,12 @@ export default function ReportsPage() {
       type: "doughnut",
       data: {
         labels: ["Authorized", "Unauthorized"],
-        datasets: [{ data: [auth, unauth], backgroundColor: ["#22c55e", "#ef4444"], borderWidth: 0, hoverOffset: 6 }],
+        datasets: [{ data: [auth, unauth], backgroundColor: ["#16a34a", "#ef4444"], borderWidth: 0, hoverOffset: 6 }],
       },
       options: {
         cutout: "65%", responsive: true, maintainAspectRatio: true,
         plugins: {
-          legend: { position: "bottom", labels: { color: "#8892b0", padding: 16 } },
+          legend: { position: "bottom", labels: { color: "#4b7a5e", padding: 16 } },
           tooltip: { callbacks: { label: c => { const t = c.dataset.data.reduce((a, b) => (a as number) + (b as number), 0) as number; return ` ${c.label}: ${c.parsed} (${t ? Math.round((c.parsed / t) * 100) : 0}%)`; } } },
         },
       },
@@ -91,7 +98,7 @@ export default function ReportsPage() {
       data: {
         labels: days.map(d => d.lbl),
         datasets: [
-          { label: "Authorized",   data: days.map(d => byDay[d.key].auth),   backgroundColor: "rgba(34,197,94,.7)",  borderRadius: 4 },
+          { label: "Authorized",   data: days.map(d => byDay[d.key].auth),   backgroundColor: "rgba(22,163,74,.7)",  borderRadius: 4 },
           { label: "Unauthorized", data: days.map(d => byDay[d.key].unauth), backgroundColor: "rgba(239,68,68,.7)", borderRadius: 4 },
         ],
       },
@@ -107,10 +114,17 @@ export default function ReportsPage() {
 
   return (
     <div className="space-y-5">
-      <h1 className="text-xl font-bold">Reports & Analytics</h1>
+      <h1 className="text-xl font-bold" style={{ color: "var(--text-main)" }}>Reports & Analytics</h1>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <Card>
-          <CardHeader title="Hourly Distribution" badge={<span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "rgba(79,142,247,.12)", color: "#4f8ef7" }}>Today</span>} />
+          <CardHeader
+            title="Hourly Distribution"
+            badge={
+              <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "rgba(22,163,74,.10)", color: "#15803d" }}>
+                Today
+              </span>
+            }
+          />
           <CardBody><div style={{ height: 260 }}><canvas ref={hourlyRef} /></div></CardBody>
         </Card>
         <Card>

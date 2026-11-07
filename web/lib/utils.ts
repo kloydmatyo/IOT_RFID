@@ -1,7 +1,7 @@
 import { format, formatDistanceToNow, isValid, parseISO } from "date-fns";
 
 export function formatTime(ts: string | undefined | null): string {
-  if (!ts || ts === "1970-01-01T00:00:00Z") return "—";
+  if (!ts || ts === "1970-01-01T00:00:00Z" || ts.trim() === "") return "—";
   try {
     const d = parseISO(ts);
     if (!isValid(d)) return ts;

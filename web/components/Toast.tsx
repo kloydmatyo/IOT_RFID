@@ -41,10 +41,10 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 function ToastItem({ toast: t, onClose }: { toast: Toast; onClose: () => void }) {
   const icons = { success: CheckCircle, error: XCircle, warning: AlertTriangle, info: Info };
   const colors = {
-    success: { border: "#22c55e", icon: "text-green-400"  },
-    error:   { border: "#ef4444", icon: "text-red-400"    },
-    warning: { border: "#f59e0b", icon: "text-yellow-400" },
-    info:    { border: "#4f8ef7", icon: "text-blue-400"   },
+    success: { border: "#16a34a", iconColor: "#16a34a" },
+    error:   { border: "#ef4444", iconColor: "#ef4444" },
+    warning: { border: "#f59e0b", iconColor: "#d97706" },
+    info:    { border: "#16a34a", iconColor: "#16a34a" },
   };
   const Icon  = icons[t.type];
   const color = colors[t.type];
@@ -52,11 +52,16 @@ function ToastItem({ toast: t, onClose }: { toast: Toast; onClose: () => void })
   return (
     <div
       className="pointer-events-auto flex items-center gap-3 px-4 py-3 rounded-lg shadow-xl animate-toast-in min-w-[280px] max-w-sm"
-      style={{ background: "var(--bg-card2)", border: `1px solid var(--border)`, borderLeft: `3px solid ${color.border}` }}
+      style={{
+        background: "var(--bg-card)",
+        border: `1px solid var(--border)`,
+        borderLeft: `3px solid ${color.border}`,
+        color: "var(--text-main)",
+      }}
     >
-      <Icon className={`w-4 h-4 shrink-0 ${color.icon}`} />
+      <Icon className="w-4 h-4 shrink-0" style={{ color: color.iconColor }} />
       <span className="text-sm flex-1">{t.message}</span>
-      <button onClick={onClose} className="text-[#4a5580] hover:text-white shrink-0">
+      <button onClick={onClose} className="shrink-0 hover:opacity-60" style={{ color: "var(--text-muted)" }}>
         <X className="w-3.5 h-3.5" />
       </button>
     </div>
