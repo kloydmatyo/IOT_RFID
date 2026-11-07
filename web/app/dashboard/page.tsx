@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 import { IdCardIcon, CheckCircle, XCircle, CreditCard } from "lucide-react";
 import { Chart, registerables } from "chart.js";
-import { useStats, useCards, useRecentLogs } from "@/hooks/useFirebase";
+import { useStats, useCards, useRecentLogs, useLogs } from "@/hooks/useFirebase";
 import StatCard from "@/components/StatCard";
 import { Card, CardHeader, CardBody } from "@/components/Card";
 import { AccessBadge } from "@/components/StatusBadge";
@@ -16,6 +16,7 @@ export default function DashboardPage() {
   const stats      = useStats();
   const { cards }  = useCards();
   const recentLogs = useRecentLogs();
+  const { logs: allLogs } = useLogs(500);
   const donutRef   = useRef<HTMLCanvasElement>(null);
   const lineRef    = useRef<HTMLCanvasElement>(null);
   const donutChart = useRef<Chart | null>(null);
@@ -55,12 +56,17 @@ export default function DashboardPage() {
     const auth:   number[] = new Array(7).fill(0);
     const unauth: number[] = new Array(7).fill(0);
 
-    recentLogs.forEach(log => {
-      if (!log.timestamp) return;
+    allLogs.forEach(log => {
       try {
-        const d = parseISO(log.timestamp);
-        if (!isValid(d)) return;
-        const label = format(d, "MMM d");
+        let label: string;
+        if (log.timestamp && log.timestamp.trim() !== "") {
+          const d = parseISO(log.timestamp);
+          if (!isValid(d)) return;
+          label = format(d, "MMM d");
+        } else {
+          // No timestamp — bucket into today
+          label = format(new Date(), "MMM d");
+        }
         const idx = labels.indexOf(label);
         if (idx === -1) return;
         if (log.authorized) auth[idx]++;
@@ -88,7 +94,7 @@ export default function DashboardPage() {
       },
     });
     return () => lineChart.current?.destroy();
-  }, [recentLogs]);
+  }, [allLogs]);
 
   return (
     <div className="space-y-6">

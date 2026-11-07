@@ -89,7 +89,7 @@ export function useLogs(limit = 200) {
 export function useRecentLogs() {
   const [logs, setLogs] = useState<AccessLog[]>([]);
   useEffect(() => {
-    const r = query(ref(db, "/accessLogs"), orderByChild("timestamp"), limitToLast(10));
+    const r = query(ref(db, "/accessLogs"), limitToLast(10));
     const unsub = onValue(r, (snap) => {
       const arr: AccessLog[] = [];
       snap.forEach((child) => {
