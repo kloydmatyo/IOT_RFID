@@ -4,10 +4,12 @@ import { useState, FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { ShieldCheck, Mail, Lock, Loader2 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+import { TEST_TEACHER, TEACHER_SESSION_KEY } from "@/lib/mockTeacher";
 
 export default function LoginPage() {
   const { login } = useAuth();
   const router    = useRouter();
+  const [role, setRole]         = useState<"admin" | "teacher">("admin");
   const [email, setEmail]       = useState("");
   const [password, setPassword] = useState("");
   const [error, setError]       = useState("");
@@ -17,6 +19,23 @@ export default function LoginPage() {
     e.preventDefault();
     setError("");
     setLoading(true);
+
+    // Teacher login (test account, no database / Firebase)
+    if (role === "teacher") {
+      if (email === TEST_TEACHER.email && password === TEST_TEACHER.password) {
+        sessionStorage.setItem(
+          TEACHER_SESSION_KEY,
+          JSON.stringify({ name: TEST_TEACHER.name, email: TEST_TEACHER.email })
+        );
+        router.replace("/teacher");
+      } else {
+        setError("Invalid teacher email or password.");
+      }
+      setLoading(false);
+      return;
+    }
+
+    // Admin login (Firebase)
     try {
       await login(email, password);
       router.replace("/dashboard");
@@ -57,7 +76,30 @@ export default function LoginPage() {
             <ShieldCheck className="w-8 h-8" style={{ color: "#16a34a" }} />
           </div>
           <h1 className="text-xl font-bold" style={{ color: "var(--text-main)" }}>RFID Access Control</h1>
-          <p className="text-sm mt-1" style={{ color: "var(--text-muted)" }}>Administrator Login</p>
+          <p className="text-sm mt-1" style={{ color: "var(--text-muted)" }}>
+            {role === "admin" ? "Administrator Login" : "Teacher Login"}
+          </p>
+        </div>
+
+        {/* Role toggle */}
+        <div
+          className="flex gap-1 p-1 mb-6 rounded-lg"
+          style={{ background: "#f0fdf4", border: "1px solid #bbf7d0" }}
+        >
+          {(["admin", "teacher"] as const).map(r => (
+            <button
+              key={r}
+              type="button"
+              onClick={() => { setRole(r); setError(""); }}
+              className="flex-1 py-2 rounded-md text-sm font-medium capitalize transition-all"
+              style={{
+                background: role === r ? "#16a34a" : "transparent",
+                color: role === r ? "#fff" : "#14532d",
+              }}
+            >
+              {r}
+            </button>
+          ))}
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -71,7 +113,7 @@ export default function LoginPage() {
                 required
                 value={email}
                 onChange={e => setEmail(e.target.value)}
-                placeholder="admin@example.com"
+                placeholder={role === "admin" ? "admin@example.com" : "teacher@test.com"}
                 className="w-full pl-9 pr-3 py-2.5 rounded-lg text-sm outline-none transition-colors"
                 style={inputStyle}
                 onFocus={e => (e.target.style.borderColor = "#16a34a")}
@@ -100,6 +142,13 @@ export default function LoginPage() {
           </div>
 
           {error && <p className="text-sm text-red-600">{error}</p>}
+
+          {/* Test credentials hint (remove when connecting to the database) */}
+          {role === "teacher" && (
+            <p className="text-xs text-center" style={{ color: "var(--text-muted)" }}>
+              Test: teacher@test.com / teacher123
+            </p>
+          )}
 
           <button
             type="submit"

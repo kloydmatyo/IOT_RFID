@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, FormEvent } from "react";
-import { Plus, Search, Pencil, Trash2, ToggleLeft, ToggleRight, Loader2, X } from "lucide-react";
+import { Plus, Search, Pencil, Trash2, ToggleLeft, ToggleRight, Loader2, X, ChevronDown } from "lucide-react";
 import { useCards } from "@/hooks/useFirebase";
 import { Card, CardHeader } from "@/components/Card";
 import { ActiveBadge } from "@/components/StatusBadge";
@@ -9,6 +9,13 @@ import ConfirmModal from "@/components/ConfirmModal";
 import { useToast } from "@/components/Toast";
 import { formatTime, validateUID, formatUID } from "@/lib/utils";
 import type { RFIDCard } from "@/lib/types";
+
+const MAX_LEN = 40;
+const ROLES = ["Student", "Teacher", "Admin"];
+
+// Letters (including accented ones like ñ) and spaces only, max 40 characters
+const cleanName = (v: string) => v.replace(/[^\p{L} ]/gu, "").slice(0, MAX_LEN);
+const NAME_PATTERN = /^[\p{L}]+(?: [\p{L}]+)*$/u;
 
 export default function RFIDManagementPage() {
   const toast = useToast();
@@ -18,7 +25,7 @@ export default function RFIDManagementPage() {
   const [editCard, setEditCard]   = useState<RFIDCard | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<RFIDCard | null>(null);
   const [saving, setSaving]    = useState(false);
-  const [form, setForm]        = useState({ uid: "", name: "", role: "", active: true });
+  const [form, setForm]        = useState({ uid: "", name: "", role: "Student", active: true });
   const [formErr, setFormErr]  = useState("");
 
   const filtered = cards.filter(c =>
@@ -29,14 +36,19 @@ export default function RFIDManagementPage() {
 
   function openAdd() {
     setEditCard(null);
-    setForm({ uid: "", name: "", role: "", active: true });
+    setForm({ uid: "", name: "", role: "Student", active: true });
     setFormErr("");
     setShowModal(true);
   }
 
   function openEdit(card: RFIDCard) {
     setEditCard(card);
-    setForm({ uid: card.uid, name: card.name, role: card.role || "", active: card.active });
+    setForm({
+      uid: card.uid,
+      name: card.name,
+      role: ROLES.includes(card.role) ? card.role : "Student",
+      active: card.active,
+    });
     setFormErr("");
     setShowModal(true);
   }
@@ -44,9 +56,13 @@ export default function RFIDManagementPage() {
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     const uid = formatUID(form.uid);
+    const name = form.name.trim().replace(/\s+/g, " ");
     if (!uid) { setFormErr("UID is required."); return; }
+    if (uid.length > MAX_LEN) { setFormErr(`UID must be ${MAX_LEN} characters or fewer.`); return; }
     if (!validateUID(uid)) { setFormErr("Invalid UID format. Use hex bytes (e.g. 3C:18:19:49)."); return; }
-    if (!form.name.trim()) { setFormErr("Cardholder name is required."); return; }
+    if (!name) { setFormErr("Cardholder name is required."); return; }
+    if (name.length > MAX_LEN) { setFormErr(`Name must be ${MAX_LEN} characters or fewer.`); return; }
+    if (!NAME_PATTERN.test(name)) { setFormErr("Name can only contain letters and spaces."); return; }
 
     if (!editCard) {
       const dup = cards.find(c => c.uid.toUpperCase() === uid);
@@ -56,10 +72,10 @@ export default function RFIDManagementPage() {
     setFormErr(""); setSaving(true);
     try {
       if (editCard) {
-        await updateCard(editCard.key, { name: form.name, role: form.role || "Member", active: form.active, updatedAt: new Date().toISOString() });
+        await updateCard(editCard.key, { name, role: form.role, active: form.active, updatedAt: new Date().toISOString() });
         toast("Card updated successfully", "success");
       } else {
-        await addCard({ uid, name: form.name, role: form.role || "Member", active: form.active, createdAt: new Date().toISOString() });
+        await addCard({ uid, name, role: form.role, active: form.active, createdAt: new Date().toISOString() });
         toast("Card registered successfully", "success");
       }
       setShowModal(false);
@@ -217,35 +233,49 @@ export default function RFIDManagementPage() {
                   RFID UID <span className="text-red-500">*</span>
                 </label>
                 <input
-                  value={form.uid} onChange={e => setForm(p => ({ ...p, uid: e.target.value }))} readOnly={!!editCard}
+                  value={form.uid}
+                  onChange={e => setForm(p => ({ ...p, uid: e.target.value.slice(0, MAX_LEN) }))}
+                  maxLength={MAX_LEN}
+                  readOnly={!!editCard}
                   placeholder="e.g. 3C:18:19:49" className="w-full px-3 py-2.5 rounded-lg text-sm outline-none"
                   style={{ ...modalInputStyle, opacity: editCard ? 0.6 : 1 }}
                   onFocus={e => (e.target.style.borderColor = "#16a34a")}
                   onBlur={e  => (e.target.style.borderColor = "#bbf7d0")}
                 />
-                <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>Format: XX:XX:XX:XX (colon-separated hex bytes)</p>
+                <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>Format: XX:XX:XX:XX (colon-separated hex bytes), up to {MAX_LEN} characters</p>
               </div>
               <div>
                 <label className="block text-xs font-medium mb-1.5" style={{ color: "var(--text-muted)" }}>
                   Cardholder Name <span className="text-red-500">*</span>
                 </label>
                 <input
-                  value={form.name} onChange={e => setForm(p => ({ ...p, name: e.target.value }))}
+                  value={form.name}
+                  onChange={e => setForm(p => ({ ...p, name: cleanName(e.target.value) }))}
+                  maxLength={MAX_LEN}
                   placeholder="e.g. Juan dela Cruz" className="w-full px-3 py-2.5 rounded-lg text-sm outline-none"
                   style={modalInputStyle}
                   onFocus={e => (e.target.style.borderColor = "#16a34a")}
                   onBlur={e  => (e.target.style.borderColor = "#bbf7d0")}
                 />
+                <p className="text-xs mt-1" style={{ color: "var(--text-muted)" }}>Letters and spaces only, up to {MAX_LEN} characters ({form.name.length}/{MAX_LEN})</p>
               </div>
               <div>
                 <label className="block text-xs font-medium mb-1.5" style={{ color: "var(--text-muted)" }}>Role</label>
-                <input
-                  value={form.role} onChange={e => setForm(p => ({ ...p, role: e.target.value }))}
-                  placeholder="e.g. Student, Staff, Admin" className="w-full px-3 py-2.5 rounded-lg text-sm outline-none"
-                  style={modalInputStyle}
-                  onFocus={e => (e.target.style.borderColor = "#16a34a")}
-                  onBlur={e  => (e.target.style.borderColor = "#bbf7d0")}
-                />
+                <div className="relative">
+                  <select
+                    value={form.role}
+                    onChange={e => setForm(p => ({ ...p, role: e.target.value }))}
+                    className="w-full appearance-none px-3 py-2.5 pr-9 rounded-lg text-sm outline-none"
+                    style={modalInputStyle}
+                    onFocus={e => (e.target.style.borderColor = "#16a34a")}
+                    onBlur={e  => (e.target.style.borderColor = "#bbf7d0")}
+                  >
+                    {ROLES.map(r => (
+                      <option key={r} value={r}>{r}</option>
+                    ))}
+                  </select>
+                  <ChevronDown className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: "var(--text-muted)" }} />
+                </div>
               </div>
               <div>
                 <label className="block text-xs font-medium mb-2" style={{ color: "var(--text-muted)" }}>Status</label>
