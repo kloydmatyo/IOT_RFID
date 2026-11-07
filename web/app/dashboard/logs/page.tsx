@@ -7,6 +7,7 @@ import { Card, CardHeader, CardFooter } from "@/components/Card";
 import { AccessBadge } from "@/components/StatusBadge";
 import { formatTime, exportCSV } from "@/lib/utils";
 import { useToast } from "@/components/Toast";
+import { TableSkeletonRows } from "@/components/LoadingSkeleton";
 
 const PAGE_SIZE = 50;
 
@@ -123,9 +124,9 @@ export default function AccessLogsPage() {
                 ))}
               </tr>
             </thead>
-            <tbody>
+            <tbody aria-busy={loading}>
               {loading ? (
-                <tr><td colSpan={5} className="px-4 py-10 text-center text-sm" style={{ color: "var(--text-muted)" }}>Loading...</td></tr>
+                <TableSkeletonRows columns={5} />
               ) : displayed.length === 0 ? (
                 <tr><td colSpan={5} className="px-4 py-10 text-center text-sm" style={{ color: "var(--text-muted)" }}>No logs match your filters</td></tr>
               ) : displayed.map(log => (

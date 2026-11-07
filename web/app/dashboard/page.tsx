@@ -3,12 +3,10 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { IdCardIcon, CheckCircle, XCircle, CreditCard, Clock, ChevronRight } from "lucide-react";
-import { Chart, registerables } from "chart.js";
+import type { Chart as ChartInstance } from "chart.js";
 import { useStats, useCards, useRecentLogs, useLogs } from "@/hooks/useFirebase";
 import { formatTime } from "@/lib/utils";
 import { subDays, format, parseISO, isValid } from "date-fns";
-
-Chart.register(...registerables);
 
 /* Palette shared with the teacher side */
 const C = {
@@ -53,9 +51,11 @@ export default function DashboardPage() {
   const { logs: allLogs } = useLogs(500);
   const donutRef = useRef<HTMLCanvasElement>(null);
   const lineRef = useRef<HTMLCanvasElement>(null);
-  const donutChart = useRef<Chart | null>(null);
-  const lineChart = useRef<Chart | null>(null);
+  const donutChart = useRef<ChartInstance | null>(null);
+  const lineChart = useRef<ChartInstance | null>(null);
   const [now, setNow] = useState<Date | null>(null);
+  const [authorizedVisible, setAuthorizedVisible] = useState(true);
+  const [unauthorizedVisible, setUnauthorizedVisible] = useState(true);
 
   const total = stats.authorizedCount + stats.unauthorizedCount;
   const authPct = total ? Math.round((stats.authorizedCount / total) * 100) : 0;
@@ -71,8 +71,12 @@ export default function DashboardPage() {
   /* ---- donut chart ---- */
   useEffect(() => {
     if (!donutRef.current) return;
-    donutChart.current?.destroy();
-    donutChart.current = new Chart(donutRef.current, {
+    let cancelled = false;
+    void import("chart.js").then(({ Chart, registerables }) => {
+      if (cancelled || !donutRef.current) return;
+      Chart.register(...registerables);
+      donutChart.current?.destroy();
+      donutChart.current = new Chart(donutRef.current, {
       type: "doughnut",
       data: {
         labels: ["Authorized", "Unauthorized"],
@@ -95,14 +99,21 @@ export default function DashboardPage() {
           tooltip: { enabled: total > 0, callbacks: { label: c => ` ${c.label}: ${c.parsed}` } },
         },
       },
+      });
+    }).catch(error => {
+      console.error("Failed to load the access overview chart.", error);
     });
-    return () => donutChart.current?.destroy();
+    return () => {
+      cancelled = true;
+      donutChart.current?.destroy();
+      donutChart.current = null;
+    };
   }, [stats, total]);
 
   /* ---- line chart (7-day) ---- */
   useEffect(() => {
     if (!lineRef.current) return;
-    lineChart.current?.destroy();
+    let cancelled = false;
 
     const labels = Array.from({ length: 7 }, (_, i) => format(subDays(new Date(), 6 - i), "MMM d"));
     const auth: number[] = new Array(7).fill(0);
@@ -128,7 +139,11 @@ export default function DashboardPage() {
       }
     });
 
-    lineChart.current = new Chart(lineRef.current, {
+    void import("chart.js").then(({ Chart, registerables }) => {
+      if (cancelled || !lineRef.current) return;
+      Chart.register(...registerables);
+      lineChart.current?.destroy();
+      lineChart.current = new Chart(lineRef.current, {
       type: "line",
       data: {
         labels,
@@ -136,12 +151,13 @@ export default function DashboardPage() {
           {
             label: "Authorized",
             data: auth,
+            hidden: !authorizedVisible,
             borderColor: C.green,
             backgroundColor: "rgba(22,163,74,.10)",
             fill: true,
             tension: 0.4,
             borderWidth: 2,
-            pointBackgroundColor: "#fff",
+            pointBackgroundColor: C.green,
             pointBorderColor: C.green,
             pointBorderWidth: 2,
             pointRadius: 4,
@@ -149,12 +165,13 @@ export default function DashboardPage() {
           {
             label: "Unauthorized",
             data: unauth,
+            hidden: !unauthorizedVisible,
             borderColor: C.red,
             backgroundColor: "rgba(220,38,38,.08)",
             fill: true,
             tension: 0.4,
             borderWidth: 2,
-            pointBackgroundColor: "#fff",
+            pointBackgroundColor: C.red,
             pointBorderColor: C.red,
             pointBorderWidth: 2,
             pointRadius: 4,
@@ -175,15 +192,19 @@ export default function DashboardPage() {
           },
         },
         plugins: {
-          legend: {
-            align: "end",
-            labels: { color: C.muted, usePointStyle: true, pointStyle: "circle", boxWidth: 8, boxHeight: 8, padding: 16, font: { size: 12 } },
-          },
+          legend: { display: false },
         },
       },
+      });
+    }).catch(error => {
+      console.error("Failed to load the scan activity chart.", error);
     });
-    return () => lineChart.current?.destroy();
-  }, [allLogs]);
+    return () => {
+      cancelled = true;
+      lineChart.current?.destroy();
+      lineChart.current = null;
+    };
+  }, [allLogs, authorizedVisible, unauthorizedVisible]);
 
   const timeText = now
     ? now.toLocaleTimeString("en-PH", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true })
@@ -280,6 +301,41 @@ export default function DashboardPage() {
               <div className="mb-4">
                 <h2 className="font-semibold" style={{ color: C.text }}>Scan activity</h2>
                 <p className="text-xs mt-0.5" style={{ color: C.muted }}>Authorized and unauthorized scans over the last 7 days.</p>
+              </div>
+              <div className="mb-2 flex justify-end gap-4">
+                {[
+                  {
+                    label: "Authorized",
+                    color: C.green,
+                    visible: authorizedVisible,
+                    toggle: () => setAuthorizedVisible(visible => !visible),
+                  },
+                  {
+                    label: "Unauthorized",
+                    color: C.red,
+                    visible: unauthorizedVisible,
+                    toggle: () => setUnauthorizedVisible(visible => !visible),
+                  },
+                ].map(item => (
+                  <button
+                    key={item.label}
+                    type="button"
+                    aria-pressed={item.visible}
+                    onClick={item.toggle}
+                    className="inline-flex items-center gap-1.5 text-xs transition-opacity hover:opacity-80"
+                    style={{ color: C.muted, textDecoration: "none" }}
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="h-3 w-3 rounded-full border-2 transition-colors"
+                      style={{
+                        borderColor: item.color,
+                        background: item.visible ? item.color : "transparent",
+                      }}
+                    />
+                    {item.label}
+                  </button>
+                ))}
               </div>
               <div style={{ height: 260 }}>
                 <canvas ref={lineRef} />

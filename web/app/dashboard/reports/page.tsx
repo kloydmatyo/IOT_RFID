@@ -1,12 +1,11 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { Chart, registerables } from "chart.js";
+import type { Chart as ChartInstance } from "chart.js";
 import { useAllLogs } from "@/hooks/useFirebase";
 import { Card, CardHeader, CardBody } from "@/components/Card";
 import { format, subDays } from "date-fns";
-
-Chart.register(...registerables);
+import LoadingSkeleton from "@/components/LoadingSkeleton";
 
 const CHART_OPTS = {
   scales: {
@@ -17,15 +16,15 @@ const CHART_OPTS = {
 };
 
 export default function ReportsPage() {
-  const { logs } = useAllLogs();
+  const { logs, loading } = useAllLogs();
   const hourlyRef  = useRef<HTMLCanvasElement>(null);
   const donutRef   = useRef<HTMLCanvasElement>(null);
   const monthlyRef = useRef<HTMLCanvasElement>(null);
-  const hourlyC    = useRef<Chart | null>(null);
-  const donutC     = useRef<Chart | null>(null);
-  const monthlyC   = useRef<Chart | null>(null);
+  const hourlyC    = useRef<ChartInstance | null>(null);
+  const donutC     = useRef<ChartInstance | null>(null);
+  const monthlyC   = useRef<ChartInstance | null>(null);
 
-  function buildHourly() {
+  function buildHourly(Chart: typeof import("chart.js").Chart) {
     if (!hourlyRef.current) return;
     hourlyC.current?.destroy();
     const today  = new Date().toISOString().substring(0, 10);
@@ -57,7 +56,7 @@ export default function ReportsPage() {
     });
   }
 
-  function buildDonut() {
+  function buildDonut(Chart: typeof import("chart.js").Chart) {
     if (!donutRef.current) return;
     donutC.current?.destroy();
     const auth   = logs.filter(l => l.authorized).length;
@@ -78,7 +77,7 @@ export default function ReportsPage() {
     });
   }
 
-  function buildMonthly() {
+  function buildMonthly(Chart: typeof import("chart.js").Chart) {
     if (!monthlyRef.current) return;
     monthlyC.current?.destroy();
     const days = Array.from({ length: 30 }, (_, i) => {
@@ -107,10 +106,29 @@ export default function ReportsPage() {
   }
 
   useEffect(() => {
-    if (!logs.length) return;
-    buildHourly(); buildDonut(); buildMonthly();
-    return () => { hourlyC.current?.destroy(); donutC.current?.destroy(); monthlyC.current?.destroy(); };
-  }, [logs]); // eslint-disable-line
+    if (loading || !logs.length) return;
+    let cancelled = false;
+    void import("chart.js").then(({ Chart, registerables }) => {
+      if (cancelled) return;
+      Chart.register(...registerables);
+      buildHourly(Chart);
+      buildDonut(Chart);
+      buildMonthly(Chart);
+    }).catch(error => {
+      console.error("Failed to load report charts.", error);
+    });
+    return () => {
+      cancelled = true;
+      hourlyC.current?.destroy();
+      donutC.current?.destroy();
+      monthlyC.current?.destroy();
+      hourlyC.current = null;
+      donutC.current = null;
+      monthlyC.current = null;
+    };
+  }, [logs, loading]); // eslint-disable-line
+
+  if (loading) return <LoadingSkeleton variant="dashboard" />;
 
   return (
     <div className="space-y-5">

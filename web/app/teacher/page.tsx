@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState, FormEvent } from "react";
+import { useEffect, useMemo, useState } from "react";
+import type { FormEvent } from "react";
+import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
 import {
   LayoutDashboard,
@@ -28,305 +30,47 @@ import {
   BookOpen,
 } from "lucide-react";
 import { TEACHER_SESSION_KEY } from "@/lib/mockTeacher";
+import LoadingSkeleton from "@/components/LoadingSkeleton";
+import TeacherSidebar from "@/components/teacher/TeacherSidebar";
+import {
+  C,
+  CODE_RE,
+  fmtDay,
+  fmtDuration,
+  fmtTime,
+  initials,
+  inputStyle,
+  cardStyle,
+  INITIAL_CLASSES,
+  INITIAL_STUDENTS,
+  EMAIL_DOMAIN,
+  MAX_LEN,
+  MAX_TIME,
+  MIN_TIME,
+  NAME_RE,
+  PROGRAM_MAX,
+  PROGRAM_RE,
+  SEARCH_MAX,
+  SECTION_MAX,
+  STATUS_META,
+  STUDENT_NO_RE,
+  WEEK_DAYS,
+  WORDS_RE,
+  buildDates,
+  paginate,
+  seedLogs,
+  toMin,
+} from "@/lib/teacher";
+import type { ClassItem, Log, StatusFilter, Student, StudentModalMode, Tab } from "@/lib/teacher";
+import Pagination from "@/components/teacher/Pagination";
 
-/* ------------------------------------------------------------------ */
-/* Types & mock data (no database yet)                                 */
-/* ------------------------------------------------------------------ */
-
-type AStatus = "present" | "late" | "absent" | "incomplete";
-type StatusFilter = "all" | AStatus;
-type Tab = "dashboard" | "classes" | "attendance" | "students" | "archive";
-
-interface ClassItem {
-  id: string;
-  name: string; // section, e.g. BSCS
-  code: string; // subject code, e.g. NSTP101
-  year: number; // 1-4
-  schedule: string;
-  start: string; // "HH:MM" 24h
-  end: string; // "HH:MM" 24h
-  room: string;
-  created: string; // ISO date
-  archived?: boolean;
-}
-
-interface Student {
-  id: string; // student number, taken from the Gordon email
-  firstName: string;
-  lastName: string;
-  name: string; // "First Last", kept in sync on save
-  email: string;
-  program: string; // e.g. BSIT
-  year: number; // 1-4
-  section: string; // e.g. BSIT 4B
-  rfid: string; // RFID card UID, empty when no card is registered yet
-  classIds: string[];
-  archived?: boolean;
-}
-
-type StudentModalMode = "add" | "edit" | "view";
-
-// One RFID attendance record (a student's tap-in / tap-out for a class on a date)
-interface Log {
-  classId: string;
-  studentId: string;
-  date: string; // ISO
-  status: AStatus;
-  timeIn?: number; // minutes since midnight
-  timeOut?: number; // minutes since midnight
-}
-
-const EMAIL_DOMAIN = "@gordoncollege.edu.ph";
-const STUDENT_NO_RE = /^20\d{7}$/; // 9 digits, always starts with 20
-const LATE_GRACE_MIN = 10;
-
-// Class form rules
-const WEEK_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]; // no Sunday
-const MIN_TIME = "06:00"; // nothing from 12AM to 5:59AM
-const MAX_TIME = "22:00"; // 10PM latest
-const MAX_LEN = 30;
-
-const SEARCH_MAX = 40; // max characters in any search bar
-const PAGE_SIZE = 20; // rows per page
-
-// letters + numbers, single spaces/hyphens allowed between words (e.g. "BSIT 3", "CCS-BSIT", "Room 201")
-const WORDS_RE = /^[A-Za-z0-9]+(?:[ -][A-Za-z0-9]+)*$/;
-const CODE_RE = /^[A-Za-z0-9]+$/;
-const cleanWords = (v: string) => v.replace(/[^A-Za-z0-9 -]/g, "").replace(/\s{2,}/g, " ").slice(0, MAX_LEN);
-const cleanCode = (v: string) => v.replace(/[^A-Za-z0-9]/g, "").slice(0, MAX_LEN);
-
-// Student form rules
-const PROGRAM_MAX = 20;
-const SECTION_MAX = 20;
-const NAME_RE = /^[A-Za-z]+(?: [A-Za-z]+)*$/; // letters only, single spaces between words
-const PROGRAM_RE = /^[A-Za-z]{1,20}$/; // letters only, no spaces
-const cleanName = (v: string) => v.replace(/[^A-Za-z ]/g, "").replace(/\s{2,}/g, " ").replace(/^\s/, "").slice(0, MAX_LEN);
-const cleanProgram = (v: string) => v.replace(/[^A-Za-z]/g, "").slice(0, PROGRAM_MAX);
-const cleanSection = (v: string) => cleanWords(v).slice(0, SECTION_MAX);
-// 9 digits only, and the number must start with 20 (the first two digits are blocked otherwise)
-const cleanStudentNo = (v: string) => {
-  let d = v.replace(/\D/g, "").slice(0, 9);
-  if (d.length >= 1 && d[0] !== "2") d = "";
-  if (d.length >= 2 && d[1] !== "0") d = d[0];
-  return d;
-};
-
-const INITIAL_CLASSES: ClassItem[] = [
-  { id: "c1", name: "BSCS", code: "NSTP101", year: 1, schedule: "Mon/Wed/Fri 8:00-9:00 AM", start: "08:00", end: "09:00", room: "Room 201", created: "2026-04-28" },
-  { id: "c2", name: "BSCA", code: "NSTP101", year: 1, schedule: "Tue/Thu 10:00-11:30 AM", start: "10:00", end: "11:30", room: "Lab 2", created: "2026-04-28" },
-  { id: "c3", name: "CCS-BSIT", code: "ITP415A", year: 3, schedule: "Mon/Wed 1:00-2:00 PM", start: "13:00", end: "14:00", room: "Room 105", created: "2026-04-27" },
-  { id: "c4", name: "BSIT 3", code: "ITP415", year: 3, schedule: "Fri 1:00-4:00 PM", start: "13:00", end: "16:00", room: "Lab 1", created: "2026-04-21" },
-];
-
-const mk = (
-  id: string, firstName: string, lastName: string, program: string, year: number,
-  section: string, rfid: string, classIds: string[]
-): Student => ({
-  id, firstName, lastName, name: `${firstName} ${lastName}`,
-  email: `${id}${EMAIL_DOMAIN}`, program, year, section, rfid, classIds,
-});
-
-const INITIAL_STUDENTS: Student[] = [
-  mk("202310417", "Juan", "Dela Cruz", "BSCS", 1, "BSCS", "7F3A91C2", ["c1"]),
-  mk("202310418", "Maria", "Santos", "BSCS", 1, "BSCS", "4C82E087", ["c1"]),
-  mk("202310419", "Jose", "Reyes", "BSCS", 1, "BSCS", "B19D2F05", ["c1"]),
-  mk("202310420", "Ana", "Garcia", "BSCA", 1, "BSCA", "E6047AA3", ["c2"]),
-  mk("202310421", "Mark", "Villanueva", "BSCA", 1, "BSCA", "2DA5C318", ["c2"]),
-  mk("202310422", "Sofia", "Mendoza", "BSCA", 1, "BSCA", "", ["c2"]),
-  mk("202310501", "Carlo", "Ramos", "BSIT", 3, "CCS-BSIT", "5B7C2E60", ["c3"]),
-  mk("202310502", "Bea", "Navarro", "BSIT", 3, "CCS-BSIT", "C3E81D49", ["c3"]),
-  mk("202310503", "Paolo", "Aquino", "BSIT", 3, "CCS-BSIT", "9A41F7D2", ["c3"]),
-];
-
-const STATUS_META: Record<AStatus, { label: string; color: string }> = {
-  present: { label: "Present", color: "#16a34a" },
-  late: { label: "Late", color: "#d97706" },
-  absent: { label: "Absent", color: "#dc2626" },
-  incomplete: { label: "Incomplete", color: "#a16207" },
-};
-
-const C = {
-  bg: "#f8f9fb",
-  surface: "#ffffff",
-  border: "#eef0f3",
-  text: "#111827",
-  muted: "#6b7280",
-  green: "#16a34a",
-  greenDark: "#15803d",
-  greenSoft: "#ecfdf3",
-  greenEdge: "#dcfce7",
-  ink: "#10231a",
-  blueSoft: "#eaf1ff",
-  blue: "#3b6fe0",
-  red: "#dc2626",
-  amber: "#b45309",
-  amberSoft: "#fef3c7",
-};
-
-const cardStyle: React.CSSProperties = {
-  background: C.surface,
-  border: `1px solid ${C.border}`,
-  boxShadow: `0 1px 2px rgba(16,24,40,.04), 0 3px 0 ${C.greenEdge}`,
-};
-
-const inputStyle: React.CSSProperties = {
-  background: C.surface,
-  border: `1px solid ${C.border}`,
-  color: C.text,
-};
+const ClassEditorModal = dynamic(() => import("@/components/teacher/ClassEditorModal"));
+const AddStudentsModal = dynamic(() => import("@/components/teacher/AddStudentsModal"));
+const StudentModal = dynamic(() => import("@/components/teacher/StudentModal"));
 
 /* ------------------------------------------------------------------ */
 /* Helpers                                                             */
 /* ------------------------------------------------------------------ */
-
-const pad = (n: number) => String(n).padStart(2, "0");
-const toISO = (d: Date) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
-const toMin = (hhmm: string) => {
-  const [h, m] = hhmm.split(":").map(Number);
-  return h * 60 + m;
-};
-
-function fmtTime(min?: number) {
-  if (min === undefined) return "—";
-  const h24 = Math.floor(min / 60) % 24;
-  const m = min % 60;
-  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
-  return `${h12}:${pad(m)} ${h24 < 12 ? "AM" : "PM"}`;
-}
-
-function fmtDuration(inMin?: number, outMin?: number) {
-  if (inMin === undefined || outMin === undefined || outMin < inMin) return "—";
-  const d = outMin - inMin;
-  const h = Math.floor(d / 60);
-  const m = d % 60;
-  return h > 0 ? `${h} hr ${m} min` : `${m} min`;
-}
-
-function fmtDay(iso: string) {
-  return new Date(iso + "T00:00:00").toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-}
-
-function initials(name: string) {
-  return name
-    .split(" ")
-    .filter(Boolean)
-    .slice(0, 2)
-    .map(p => p[0])
-    .join("")
-    .toUpperCase();
-}
-
-// Slice a list into pages. The page number is clamped so it is always valid.
-function paginate<T>(items: T[], page: number) {
-  const totalPages = Math.max(1, Math.ceil(items.length / PAGE_SIZE));
-  const current = Math.min(Math.max(page, 1), totalPages);
-  return {
-    items: items.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE),
-    page: current,
-    totalPages,
-    total: items.length,
-  };
-}
-
-function Pagination({
-  page,
-  totalPages,
-  total,
-  onChange,
-}: {
-  page: number;
-  totalPages: number;
-  total: number;
-  onChange: (p: number) => void;
-}) {
-  if (total <= PAGE_SIZE) return null;
-  const start = (page - 1) * PAGE_SIZE + 1;
-  const end = Math.min(page * PAGE_SIZE, total);
-  const btn = "flex items-center gap-1 px-3 py-2 rounded-lg text-xs font-semibold disabled:opacity-40";
-  const btnStyle = { background: C.surface, color: C.text, border: `1px solid ${C.border}` };
-  return (
-    <div
-      className="flex flex-wrap items-center justify-between gap-3 px-5 py-3"
-      style={{ borderTop: `1px solid ${C.border}` }}
-    >
-      <p className="text-xs" style={{ color: C.muted }}>
-        Showing {start}-{end} of {total}
-      </p>
-      <div className="flex items-center gap-2">
-        <button className={btn} style={btnStyle} disabled={page <= 1} onClick={() => onChange(page - 1)}>
-          <ChevronLeft className="w-3.5 h-3.5" /> Prev
-        </button>
-        <span className="text-xs font-semibold px-1" style={{ color: C.text }}>
-          Page {page} of {totalPages}
-        </span>
-        <button className={btn} style={btnStyle} disabled={page >= totalPages} onClick={() => onChange(page + 1)}>
-          Next <ChevronRight className="w-3.5 h-3.5" />
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// Deterministic pseudo-random number (0-1) so the demo history stays stable
-function seeded(seed: string) {
-  let h = 0;
-  for (const ch of seed) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-  return (h % 1000) / 1000;
-}
-
-// Last 6 school days (Mon-Fri) before today, oldest first, plus today.
-// Only call this from an effect or event handler (never during render).
-function buildDates(): { past: string[]; today: string } {
-  const today = new Date();
-  const past: string[] = [];
-  const d = new Date(today);
-  while (past.length < 6) {
-    d.setDate(d.getDate() - 1);
-    const day = d.getDay();
-    if (day !== 0 && day !== 6) past.unshift(toISO(d));
-  }
-  return { past, today: toISO(today) };
-}
-
-// Demo RFID tap data. Replace with real data from Firebase later.
-function seedLogs(students: Student[], classes: ClassItem[], pastDates: string[], today: string): Log[] {
-  const out: Log[] = [];
-  for (const date of [...pastDates, today]) {
-    const isToday = date === today;
-    for (const s of students) {
-      for (const classId of s.classIds) {
-        const cls = classes.find(c => c.id === classId);
-        if (!cls) continue;
-        const start = toMin(cls.start);
-        const end = toMin(cls.end);
-        const r = seeded(`${classId}${date}${s.id}`);
-        const timeIn = start - 20 + Math.round(seeded(`in${classId}${date}${s.id}`) * 45);
-        const late = timeIn > start + LATE_GRACE_MIN;
-
-        if (isToday) {
-          if (r > 0.6) continue; // has not tapped yet
-          out.push({ classId, studentId: s.id, date, status: late ? "late" : "present", timeIn });
-          continue;
-        }
-        if (r < 0.15) {
-          out.push({ classId, studentId: s.id, date, status: "absent" });
-          continue;
-        }
-        if (r < 0.22) {
-          out.push({ classId, studentId: s.id, date, status: "incomplete", timeIn });
-          continue;
-        }
-        const timeOut = end - 2 + Math.round(seeded(`out${classId}${date}${s.id}`) * 10);
-        out.push({ classId, studentId: s.id, date, status: late ? "late" : "present", timeIn, timeOut });
-      }
-    }
-  }
-  return out;
-}
 
 /* ------------------------------------------------------------------ */
 /* Page                                                                */
@@ -859,7 +603,7 @@ export default function TeacherPage() {
     URL.revokeObjectURL(url);
   }
 
-  if (!teacher || !dates) return null;
+  if (!teacher || !dates) return <LoadingSkeleton variant="teacher" />;
 
   const navItems: { id: Tab; label: string; icon: typeof LayoutDashboard }[] = [
     { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
@@ -1115,90 +859,17 @@ export default function TeacherPage() {
     <div className="flex min-h-screen" style={{ background: C.bg, fontFamily: "'Poppins', system-ui, sans-serif" }}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap'); @keyframes toastIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }`}</style>
 
-      {/* ============================ SIDEBAR ============================ */}
-      <aside
-        className="sticky top-0 h-screen flex flex-col shrink-0 transition-[width] duration-200"
-        style={{
-          width: collapsed ? 76 : 256,
-          background: C.surface,
-          borderRight: `1px solid ${C.border}`,
-        }}
-      >
-        <div
-          className="flex items-center gap-3 px-5 relative"
-          style={{ height: 76, borderBottom: `1px solid ${C.border}` }}
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/gclogo.png" alt="Gordon College logo" className="w-9 h-9 rounded-full object-contain shrink-0" />
-          {!collapsed && (
-            <span className="min-w-0 text-[11px] font-bold leading-tight tracking-tight" style={{ color: C.text }}>
-              RFID-BASED STUDENT ATTENDANCE MONITORING
-            </span>
-          )}
-          <button
-            onClick={() => setCollapsed(v => !v)}
-            aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-            className="absolute -right-3 top-[64px] w-6 h-6 rounded-full flex items-center justify-center"
-            style={{ background: C.surface, border: `1px solid ${C.border}`, color: C.green }}
-          >
-            {collapsed ? <ChevronRight className="w-3.5 h-3.5" /> : <ChevronLeft className="w-3.5 h-3.5" />}
-          </button>
-        </div>
-
-        <nav className="flex-1 px-3 pt-6 space-y-1">
-          {navItems.map(n => {
-            const Icon = n.icon;
-            const active = tab === n.id;
-            return (
-              <button
-                key={n.id}
-                onClick={() => {
-                  setTab(n.id);
-                  if (n.id === "classes") setOpenClassId(null);
-                }}
-                title={n.label}
-                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-left"
-                style={{
-                  background: active ? C.greenSoft : "transparent",
-                  color: active ? C.green : C.muted,
-                  borderLeft: active ? `3px solid ${C.green}` : "3px solid transparent",
-                }}
-              >
-                <Icon className="w-[18px] h-[18px] shrink-0" />
-                {!collapsed && <span>{n.label}</span>}
-              </button>
-            );
-          })}
-        </nav>
-
-        <div style={{ borderTop: `1px solid ${C.border}` }}>
-          <div className="flex items-center gap-3 px-5 py-4">
-            <div
-              className="w-9 h-9 rounded-full flex items-center justify-center text-sm font-semibold text-white shrink-0"
-              style={{ background: C.green }}
-            >
-              {initial}
-            </div>
-            {!collapsed && (
-              <div className="min-w-0">
-                <p className="text-sm font-semibold truncate" style={{ color: C.text }}>{teacher.name}</p>
-                <p className="text-[11px] font-medium uppercase truncate" style={{ color: C.muted }}>Instructor</p>
-              </div>
-            )}
-          </div>
-          <div className="px-3 pb-4" style={{ borderTop: `1px solid ${C.border}` }}>
-            <button
-              onClick={() => setConfirmSignOut(true)}
-              title="Sign out"
-              className="w-full flex items-center gap-3 px-3 py-2.5 mt-2 rounded-lg text-sm font-medium"
-              style={{ color: C.red }}
-            >
-              <LogOut className="w-[18px] h-[18px] shrink-0" />
-              {!collapsed && <span>Sign out</span>}
-            </button>
-          </div>
-        </div>
-      </aside>
+      <TeacherSidebar
+        collapsed={collapsed}
+        setCollapsed={setCollapsed}
+        navItems={navItems}
+        tab={tab}
+        setTab={setTab}
+        setOpenClassId={setOpenClassId}
+        initial={initial}
+        teacher={teacher}
+        setConfirmSignOut={setConfirmSignOut}
+      />
 
       {/* ============================== MAIN ============================== */}
       <main className="flex-1 min-w-0 px-4 sm:px-10 py-8">
@@ -2169,454 +1840,64 @@ export default function TeacherPage() {
         );
       })()}
 
-      {/* ============================ ADD CLASS MODAL ============================ */}
-      {showAdd && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4"
-          style={{ background: "rgba(17,24,39,.45)" }}
-          onClick={() => setShowAdd(false)}
-        >
-          <div
-            className="w-full max-w-md max-h-[90vh] overflow-y-auto overflow-x-hidden rounded-2xl p-6"
-            style={{ background: C.surface }}
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-bold" style={{ color: C.text }}>{editingClassId ? "Edit class" : "Add class"}</h2>
-              <button onClick={() => setShowAdd(false)} aria-label="Close" style={{ color: C.muted }}>
-                <X className="w-5 h-5" />
-              </button>
-            </div>
+      {showAdd && <ClassEditorModal
+        editing={editingClassId !== null}
+        onClose={() => setShowAdd(false)}
+        onSubmit={handleAddClass}
+        name={newName}
+        setName={setNewName}
+        code={newCode}
+        setCode={setNewCode}
+        year={newYear}
+        setYear={setNewYear}
+        room={newRoom}
+        setRoom={setNewRoom}
+        days={newDays}
+        setDays={setNewDays}
+        start={newStart}
+        setStart={setNewStart}
+        end={newEnd}
+        setEnd={setNewEnd}
+        error={classError}
+      />}
 
-            <form onSubmit={handleAddClass} className="space-y-4">
-              <div className="grid grid-cols-2 gap-3">
-                <div className="min-w-0">
-                  <label className="block text-sm font-medium mb-1.5" style={{ color: C.muted }}>Class name</label>
-                  <input
-                    value={newName}
-                    onChange={e => setNewName(cleanWords(e.target.value))}
-                    maxLength={MAX_LEN}
-                    placeholder="BSIT 3"
-                    className="w-full min-w-0 px-3 py-2.5 rounded-lg text-sm outline-none"
-                    style={inputStyle}
-                  />
-                </div>
-                <div className="min-w-0">
-                  <label className="block text-sm font-medium mb-1.5" style={{ color: C.muted }}>Subject code</label>
-                  <input
-                    value={newCode}
-                    onChange={e => setNewCode(cleanCode(e.target.value))}
-                    maxLength={MAX_LEN}
-                    placeholder="ITP415"
-                    className="w-full min-w-0 px-3 py-2.5 rounded-lg text-sm outline-none"
-                    style={inputStyle}
-                  />
-                </div>
-              </div>
+      {addStudentsOpen && openClassItem && <AddStudentsModal
+        classItem={openClassItem}
+        students={activeStudents}
+        search={pickSearch}
+        setSearch={setPickSearch}
+        selectedIds={pickIds}
+        setSelectedIds={setPickIds}
+        onAdd={addPickedToClass}
+        onClose={() => setAddStudentsOpen(false)}
+      />}
 
-              <div className="grid grid-cols-2 gap-3">
-                <div className="min-w-0">
-                  <label className="block text-sm font-medium mb-1.5" style={{ color: C.muted }}>Year level</label>
-                  <select
-                    value={newYear}
-                    onChange={e => setNewYear(Number(e.target.value))}
-                    className="w-full min-w-0 px-3 py-2.5 rounded-lg text-sm outline-none"
-                    style={inputStyle}
-                  >
-                    {[1, 2, 3, 4].map(y => (
-                      <option key={y} value={y}>Year {y}</option>
-                    ))}
-                  </select>
-                </div>
-                <div className="min-w-0">
-                  <label className="block text-sm font-medium mb-1.5" style={{ color: C.muted }}>Room</label>
-                  <input
-                    value={newRoom}
-                    onChange={e => setNewRoom(cleanWords(e.target.value))}
-                    maxLength={MAX_LEN}
-                    placeholder="Room 201"
-                    className="w-full min-w-0 px-3 py-2.5 rounded-lg text-sm outline-none"
-                    style={inputStyle}
-                  />
-                </div>
-              </div>
-
-              <div className="min-w-0">
-                <label className="block text-sm font-medium mb-1.5" style={{ color: C.muted }}>Days</label>
-                <div className="grid grid-cols-3 gap-2">
-                  {WEEK_DAYS.map(d => {
-                    const checked = newDays.includes(d);
-                    return (
-                      <label
-                        key={d}
-                        className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm cursor-pointer min-w-0"
-                        style={{
-                          border: `1px solid ${checked ? C.green : C.border}`,
-                          background: checked ? C.greenSoft : C.surface,
-                          color: C.text,
-                        }}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={() =>
-                            setNewDays(prev => (prev.includes(d) ? prev.filter(x => x !== d) : [...prev, d]))
-                          }
-                          style={{ accentColor: C.green }}
-                        />
-                        <span>{d}</span>
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div className="min-w-0">
-                  <label className="block text-sm font-medium mb-1.5" style={{ color: C.muted }}>Start time</label>
-                  <input
-                    type="time"
-                    value={newStart}
-                    min={MIN_TIME}
-                    max={MAX_TIME}
-                    onChange={e => setNewStart(e.target.value)}
-                    className="w-full min-w-0 px-3 py-2.5 rounded-lg text-sm outline-none"
-                    style={inputStyle}
-                  />
-                </div>
-                <div className="min-w-0">
-                  <label className="block text-sm font-medium mb-1.5" style={{ color: C.muted }}>End time</label>
-                  <input
-                    type="time"
-                    value={newEnd}
-                    min={MIN_TIME}
-                    max={MAX_TIME}
-                    onChange={e => setNewEnd(e.target.value)}
-                    className="w-full min-w-0 px-3 py-2.5 rounded-lg text-sm outline-none"
-                    style={inputStyle}
-                  />
-                </div>
-              </div>
-              <p className="text-xs" style={{ color: C.muted }}>Classes run from 6:00 AM to 10:00 PM.</p>
-
-              {classError && <p className="text-sm" style={{ color: C.red }}>{classError}</p>}
-
-              <div className="flex justify-end gap-2 pt-1">
-                <button
-                  type="button"
-                  onClick={() => setShowAdd(false)}
-                  className="px-4 py-2.5 rounded-lg text-sm font-medium"
-                  style={{ background: C.bg, color: C.muted, border: `1px solid ${C.border}` }}
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2.5 rounded-lg text-sm font-semibold text-white"
-                  style={{ background: C.green }}
-                >
-                  {editingClassId ? "Save changes" : "Add class"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
-
-      {/* ======================== ADD STUDENTS TO CLASS MODAL ======================== */}
-      {addStudentsOpen && openClassItem && (() => {
-        const q = pickSearch.trim().toLowerCase();
-        const available = activeStudents.filter(
-          x => !x.classIds.includes(openClassItem.id) && (!q || x.name.toLowerCase().includes(q) || x.id.includes(q))
-        );
-        const noneLeft = activeStudents.every(x => x.classIds.includes(openClassItem.id));
-        return (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center p-4"
-            style={{ background: "rgba(17,24,39,.45)" }}
-            onClick={() => setAddStudentsOpen(false)}
-          >
-            <div
-              className="w-full max-w-md max-h-[90vh] flex flex-col rounded-2xl p-6"
-              style={{ background: C.surface }}
-              onClick={e => e.stopPropagation()}
-            >
-              <div className="flex items-center justify-between mb-1">
-                <h2 className="text-lg font-bold" style={{ color: C.text }}>Add students</h2>
-                <button onClick={() => setAddStudentsOpen(false)} aria-label="Close" style={{ color: C.muted }}>
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-              <p className="text-xs mb-4" style={{ color: C.muted }}>
-                Pick registered students to enroll in {openClassItem.name} · {openClassItem.code}.
-              </p>
-
-              <div className="relative mb-3">
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4" style={{ color: C.muted }} />
-                <input
-                  value={pickSearch}
-                  onChange={e => setPickSearch(e.target.value)}
-                  maxLength={SEARCH_MAX}
-                  placeholder="Search name or ID"
-                  className="w-full pl-9 pr-3 py-2.5 rounded-lg text-sm outline-none"
-                  style={inputStyle}
-                />
-              </div>
-
-              <div className="flex-1 overflow-y-auto space-y-2 min-h-[120px]">
-                {available.map(x => {
-                  const checked = pickIds.includes(x.id);
-                  return (
-                    <label
-                      key={x.id}
-                      className="flex items-center gap-3 px-3 py-2.5 rounded-lg cursor-pointer"
-                      style={{ border: `1px solid ${checked ? C.green : C.border}`, background: checked ? C.greenSoft : C.surface }}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={checked}
-                        onChange={() => setPickIds(prev => (prev.includes(x.id) ? prev.filter(i => i !== x.id) : [...prev, x.id]))}
-                        style={{ accentColor: C.green }}
-                      />
-                      <div className="min-w-0">
-                        <p className="text-sm font-semibold truncate" style={{ color: C.text }}>{x.lastName}, {x.firstName}</p>
-                        <p className="text-xs" style={{ color: C.muted }}>{x.id} · {x.section}</p>
-                      </div>
-                    </label>
-                  );
-                })}
-                {available.length === 0 && (
-                  <p className="text-sm text-center py-8" style={{ color: C.muted }}>
-                    {noneLeft
-                      ? "Every registered student is already in this class. Register new students in the Students tab."
-                      : "No students match your search."}
-                  </p>
-                )}
-              </div>
-
-              <div className="flex justify-end gap-2 pt-4">
-                <button
-                  onClick={() => setAddStudentsOpen(false)}
-                  className="px-4 py-2.5 rounded-lg text-sm font-medium"
-                  style={{ background: C.bg, color: C.muted, border: `1px solid ${C.border}` }}
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={() => addPickedToClass(openClassItem)}
-                  disabled={pickIds.length === 0}
-                  className="px-4 py-2.5 rounded-lg text-sm font-semibold text-white disabled:opacity-50"
-                  style={{ background: C.green }}
-                >
-                  {pickIds.length > 0 ? `Add ${pickIds.length} student${pickIds.length === 1 ? "" : "s"}` : "Add students"}
-                </button>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
-
-      {/* ======================== STUDENT MODAL (add / edit / view) ======================== */}
-      {studentModal && (() => {
-        const mode = studentModal.mode;
-        const viewing = mode === "view";
-        const current = students.find(x => x.id === studentModal.id);
-        const title = mode === "add" ? "Add student" : mode === "edit" ? "Edit student" : "Student details";
-        const label = "block text-sm font-medium mb-1.5";
-        const field = "w-full min-w-0 px-3 py-2.5 rounded-lg text-sm outline-none";
-        return (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center p-4"
-            style={{ background: "rgba(17,24,39,.45)" }}
-            onClick={() => setStudentModal(null)}
-          >
-            <div
-              className="w-full max-w-lg max-h-[90vh] overflow-y-auto overflow-x-hidden rounded-2xl p-6"
-              style={{ background: C.surface }}
-              onClick={e => e.stopPropagation()}
-            >
-              <div className="flex items-center justify-between mb-4">
-                <h2 className="text-lg font-bold" style={{ color: C.text }}>{title}</h2>
-                <button onClick={() => setStudentModal(null)} aria-label="Close" style={{ color: C.muted }}>
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-
-              {viewing && current ? (
-                <div className="space-y-5">
-                  <div className="flex items-center gap-3">
-                    <div
-                      className="w-12 h-12 rounded-full flex items-center justify-center text-sm font-semibold"
-                      style={{ background: C.greenSoft, color: C.greenDark, border: `1px solid ${C.greenEdge}` }}
-                    >
-                      {initials(current.name)}
-                    </div>
-                    <div className="min-w-0">
-                      <p className="font-semibold" style={{ color: C.text }}>{current.lastName}, {current.firstName}</p>
-                      <p className="text-xs truncate" style={{ color: C.muted }}>{current.email}</p>
-                    </div>
-                  </div>
-                  <dl className="grid grid-cols-2 gap-4 text-sm">
-                    {[
-                      ["Student ID", current.id],
-                      ["Program", current.program],
-                      ["Year", String(current.year)],
-                      ["Section", current.section],
-                      ["RFID UID", current.rfid || "—"],
-                      ["Card status", current.rfid ? "Registered" : "No card"],
-                    ].map(([k, v]) => (
-                      <div key={k}>
-                        <dt className="text-xs" style={{ color: C.muted }}>{k}</dt>
-                        <dd className="font-semibold" style={{ color: C.text }}>{v}</dd>
-                      </div>
-                    ))}
-                  </dl>
-                  <div>
-                    <p className="text-xs mb-2" style={{ color: C.muted }}>Classes</p>
-                    <div className="flex flex-wrap gap-1.5">
-                      {current.classIds.map(id => {
-                        const c = classes.find(x => x.id === id);
-                        return c ? (
-                          <span
-                            key={id}
-                            className="px-2 py-0.5 rounded-md text-xs"
-                            style={{ background: C.greenSoft, color: C.greenDark, border: `1px solid ${C.greenEdge}` }}
-                          >
-                            {c.name} · {c.code}{c.archived ? " (archived)" : ""}
-                          </span>
-                        ) : null;
-                      })}
-                    </div>
-                  </div>
-                  <div className="flex justify-end gap-2">
-                    <button
-                      onClick={() => setStudentModal(null)}
-                      className="px-4 py-2.5 rounded-lg text-sm font-medium"
-                      style={{ background: C.bg, color: C.muted, border: `1px solid ${C.border}` }}
-                    >
-                      Close
-                    </button>
-                    <button
-                      onClick={() => openStudentModal("edit", current)}
-                      className="px-4 py-2.5 rounded-lg text-sm font-semibold text-white"
-                      style={{ background: C.green }}
-                    >
-                      Edit student
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <form onSubmit={handleSaveStudent} className="space-y-4">
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="min-w-0">
-                      <label className={label} style={{ color: C.muted }}>First name</label>
-                      <input value={sFirst} onChange={e => setSFirst(cleanName(e.target.value))} maxLength={MAX_LEN} placeholder="Juan" className={field} style={inputStyle} />
-                    </div>
-                    <div className="min-w-0">
-                      <label className={label} style={{ color: C.muted }}>Last name</label>
-                      <input value={sLast} onChange={e => setSLast(cleanName(e.target.value))} maxLength={MAX_LEN} placeholder="Dela Cruz" className={field} style={inputStyle} />
-                    </div>
-                  </div>
-                  <div>
-                    <label className={label} style={{ color: C.muted }}>Gordon College email</label>
-                    <div
-                      className="flex items-center rounded-lg overflow-hidden"
-                      style={{ ...inputStyle, ...(mode === "edit" ? { background: C.bg } : {}) }}
-                    >
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        value={sEmail}
-                        onChange={e => setSEmail(cleanStudentNo(e.target.value))}
-                        readOnly={mode === "edit"}
-                        maxLength={9}
-                        placeholder="202310417"
-                        className="flex-1 min-w-0 px-3 py-2.5 text-sm outline-none bg-transparent"
-                        style={{ color: mode === "edit" ? C.muted : C.text }}
-                      />
-                      <span className="pr-3 text-sm shrink-0" style={{ color: C.muted }}>{EMAIL_DOMAIN}</span>
-                    </div>
-                    {mode === "add" && (
-                      <p className="text-xs mt-1" style={{ color: C.muted }}>
-                        Type the 9-digit student number starting with 20. It becomes the student ID.
-                      </p>
-                    )}
-                  </div>
-                  <div className="grid grid-cols-3 gap-3">
-                    <div className="min-w-0">
-                      <label className={label} style={{ color: C.muted }}>Program</label>
-                      <input value={sProgram} onChange={e => setSProgram(cleanProgram(e.target.value))} maxLength={PROGRAM_MAX} placeholder="BSIT" className={field} style={inputStyle} />
-                    </div>
-                    <div className="min-w-0">
-                      <label className={label} style={{ color: C.muted }}>Year</label>
-                      <select value={sYear} onChange={e => setSYear(Number(e.target.value))} className={field} style={inputStyle}>
-                        {[1, 2, 3, 4].map(y => (
-                          <option key={y} value={y}>{y}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="min-w-0">
-                      <label className={label} style={{ color: C.muted }}>Section</label>
-                      <input value={sSection} onChange={e => setSSection(cleanSection(e.target.value))} maxLength={SECTION_MAX} placeholder="BSIT 4B" className={field} style={inputStyle} />
-                    </div>
-                  </div>
-                  <div>
-                    <label className={label} style={{ color: C.muted }}>RFID UID (optional)</label>
-                    <input
-                      value={sRfid}
-                      onChange={e => setSRfid(e.target.value.toUpperCase())}
-                      placeholder="7F3A91C2"
-                      className={`${field} font-mono`}
-                      style={inputStyle}
-                    />
-                    <p className="text-xs mt-1" style={{ color: C.muted }}>Leave blank if the student has no card yet.</p>
-                  </div>
-                  <div>
-                    <p className={label} style={{ color: C.muted }}>Classes</p>
-                    <div className="grid grid-cols-2 gap-2">
-                      {activeClasses.map(c => (
-                        <label
-                          key={c.id}
-                          className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm cursor-pointer min-w-0"
-                          style={{ border: `1px solid ${sClassIds.includes(c.id) ? C.green : C.border}`, background: sClassIds.includes(c.id) ? C.greenSoft : C.surface, color: C.text }}
-                        >
-                          <input
-                            type="checkbox"
-                            checked={sClassIds.includes(c.id)}
-                            onChange={() => toggleClass(c.id)}
-                            style={{ accentColor: C.green }}
-                          />
-                          <span className="truncate">{c.name} · {c.code}</span>
-                        </label>
-                      ))}
-                    </div>
-                  </div>
-
-                  {sError && <p className="text-sm" style={{ color: C.red }}>{sError}</p>}
-
-                  <div className="flex justify-end gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => setStudentModal(null)}
-                      className="px-4 py-2.5 rounded-lg text-sm font-medium"
-                      style={{ background: C.bg, color: C.muted, border: `1px solid ${C.border}` }}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      type="submit"
-                      className="px-4 py-2.5 rounded-lg text-sm font-semibold text-white"
-                      style={{ background: C.green }}
-                    >
-                      {mode === "add" ? "Add student" : "Save changes"}
-                    </button>
-                  </div>
-                </form>
-              )}
-            </div>
-          </div>
-        );
-      })()}
+      {studentModal && <StudentModal
+        modal={studentModal}
+        students={students}
+        classes={classes}
+        activeClasses={activeClasses}
+        onClose={() => setStudentModal(null)}
+        onOpen={openStudentModal}
+        onSave={handleSaveStudent}
+        firstName={sFirst}
+        setFirstName={setSFirst}
+        lastName={sLast}
+        setLastName={setSLast}
+        emailId={sEmail}
+        setEmailId={setSEmail}
+        program={sProgram}
+        setProgram={setSProgram}
+        year={sYear}
+        setYear={setSYear}
+        section={sSection}
+        setSection={setSSection}
+        rfid={sRfid}
+        setRfid={setSRfid}
+        classIds={sClassIds}
+        onToggleClass={toggleClass}
+        error={sError}
+      />}
     </div>
   );
 }

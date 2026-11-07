@@ -10,6 +10,7 @@ import {
 import { useAuth } from "@/context/AuthContext";
 import { useFirebaseConnection } from "@/hooks/useFirebase";
 import { ToastProvider } from "@/components/Toast";
+import LoadingSkeleton from "@/components/LoadingSkeleton";
 
 /* Same palette as the teacher side */
 const C = {
@@ -38,6 +39,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   const pathname  = usePathname();
   const connected = useFirebaseConnection();
   const [collapsed, setCollapsed] = useState(false);
+  const [confirmSignOut, setConfirmSignOut] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
+  const [signOutError, setSignOutError] = useState("");
 
   useEffect(() => {
     if (!loading && !user) router.replace("/login");
@@ -49,17 +53,27 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   }, []);
 
   if (loading || !user) {
-    return (
-      <div className="flex items-center justify-center min-h-screen" style={{ background: C.bg }}>
-        <div className="w-8 h-8 border-2 rounded-full animate-spin" style={{ borderColor: C.green, borderTopColor: "transparent" }} />
-      </div>
-    );
+    return <LoadingSkeleton variant="dashboard-shell" />;
   }
 
   const isActive = (href: string) => (href === "/dashboard" ? pathname === href : pathname.startsWith(href));
   const email = user.email ?? "";
   const name = email.split("@")[0] || "Admin";
   const initial = (name[0] ?? "A").toUpperCase();
+
+  async function handleSignOut() {
+    setSigningOut(true);
+    setSignOutError("");
+    try {
+      await logout();
+      router.push("/login");
+    } catch (error) {
+      console.error("Failed to sign out.", error);
+      setSignOutError("Sign out failed. Please try again.");
+    } finally {
+      setSigningOut(false);
+    }
+  }
 
   return (
     <ToastProvider>
@@ -145,7 +159,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             </div>
             <div className="px-3 pb-4" style={{ borderTop: `1px solid ${C.border}` }}>
               <button
-                onClick={() => logout().then(() => router.push("/login"))}
+                onClick={() => setConfirmSignOut(true)}
                 title="Sign out"
                 className="w-full flex items-center gap-3 px-3 py-2.5 mt-2 rounded-lg text-sm font-medium"
                 style={{ color: C.red }}
@@ -156,6 +170,58 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
             </div>
           </div>
         </aside>
+
+        {confirmSignOut && (
+          <div
+            className="fixed inset-0 z-[100] flex items-center justify-center p-4"
+            style={{ background: "rgba(17,24,39,.45)" }}
+            onClick={() => {
+              if (!signingOut) {
+                setConfirmSignOut(false);
+                setSignOutError("");
+              }
+            }}
+          >
+            <div
+              className="w-full max-w-sm rounded-2xl p-6"
+              style={{ background: C.surface }}
+              onClick={event => event.stopPropagation()}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="admin-signout-title"
+            >
+              <div className="w-11 h-11 rounded-xl flex items-center justify-center mb-4" style={{ background: "#fee2e2" }}>
+                <LogOut className="w-5 h-5" style={{ color: C.red }} />
+              </div>
+              <h2 id="admin-signout-title" className="text-lg font-bold" style={{ color: C.text }}>Sign out?</h2>
+              <p className="text-sm mt-1" style={{ color: C.muted }}>
+                You will need to sign in again to view the dashboard.
+              </p>
+              {signOutError && <p className="text-sm mt-3" role="alert" style={{ color: C.red }}>{signOutError}</p>}
+              <div className="flex justify-end gap-2 mt-6">
+                <button
+                  onClick={() => {
+                    setConfirmSignOut(false);
+                    setSignOutError("");
+                  }}
+                  disabled={signingOut}
+                  className="px-4 py-2.5 rounded-lg text-sm font-medium disabled:opacity-50"
+                  style={{ background: C.bg, color: C.muted, border: `1px solid ${C.border}` }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleSignOut}
+                  disabled={signingOut}
+                  className="px-4 py-2.5 rounded-lg text-sm font-semibold text-white disabled:opacity-50"
+                  style={{ background: C.red }}
+                >
+                  {signingOut ? "Signing out..." : "Sign out"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* ============================== MAIN ============================== */}
         <main className="flex-1 min-w-0 px-4 sm:px-10 py-8">

@@ -9,6 +9,7 @@ import ConfirmModal from "@/components/ConfirmModal";
 import { useToast } from "@/components/Toast";
 import { formatTime, validateUID, formatUID } from "@/lib/utils";
 import type { RFIDCard } from "@/lib/types";
+import { TableSkeletonRows } from "@/components/LoadingSkeleton";
 
 const MAX_LEN = 40;
 const ROLES = ["Student", "Teacher", "Admin"];
@@ -163,9 +164,9 @@ export default function RFIDManagementPage() {
                 ))}
               </tr>
             </thead>
-            <tbody>
+            <tbody aria-busy={loading}>
               {loading ? (
-                <tr><td colSpan={6} className="px-4 py-10 text-center text-sm" style={{ color: "var(--text-muted)" }}>Loading...</td></tr>
+                <TableSkeletonRows columns={6} />
               ) : filtered.length === 0 ? (
                 <tr><td colSpan={6} className="px-4 py-10 text-center text-sm" style={{ color: "var(--text-muted)" }}>{search ? "No cards match your search" : "No cards registered yet"}</td></tr>
               ) : filtered.map(card => (
