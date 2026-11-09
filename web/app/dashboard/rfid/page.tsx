@@ -1,13 +1,13 @@
 "use client";
 
 import { useState, FormEvent } from "react";
-import { Plus, Search, Pencil, Trash2, ToggleLeft, ToggleRight, Loader2, X, ChevronDown } from "lucide-react";
-import { useCards } from "@/hooks/useFirebase";
+import { Plus, Search, Loader2, X, ChevronDown } from "lucide-react";
+import { useCards, useRegisteredStudents } from "@/hooks/useFirebase";
 import { Card, CardHeader } from "@/components/Card";
 import { ActiveBadge } from "@/components/StatusBadge";
 import ConfirmModal from "@/components/ConfirmModal";
 import { useToast } from "@/components/Toast";
-import { formatTime, validateUID, formatUID } from "@/lib/utils";
+import { validateUID, formatUID } from "@/lib/utils";
 import type { RFIDCard } from "@/lib/types";
 import { TableSkeletonRows } from "@/components/LoadingSkeleton";
 
@@ -20,7 +20,8 @@ const NAME_PATTERN = /^[\p{L}]+(?: [\p{L}]+)*$/u;
 
 export default function RFIDManagementPage() {
   const toast = useToast();
-  const { cards, loading, addCard, updateCard, deleteCard } = useCards();
+  const { cards, addCard, updateCard, deleteCard } = useCards();
+  const { students, loading: studentsLoading } = useRegisteredStudents();
   const [search, setSearch]     = useState("");
   const [showModal, setShowModal] = useState(false);
   const [editCard, setEditCard]   = useState<RFIDCard | null>(null);
@@ -29,10 +30,11 @@ export default function RFIDManagementPage() {
   const [form, setForm]        = useState({ uid: "", name: "", role: "Student", active: true });
   const [formErr, setFormErr]  = useState("");
 
-  const filtered = cards.filter(c =>
+  const filteredStudents = students.filter(student =>
     !search ||
-    c.uid.toLowerCase().includes(search.toLowerCase()) ||
-    c.name.toLowerCase().includes(search.toLowerCase())
+    student.name.toLowerCase().includes(search.toLowerCase()) ||
+    student.studentId.toLowerCase().includes(search.toLowerCase()) ||
+    (student.rfidUid ?? "").toLowerCase().includes(search.toLowerCase())
   );
 
   function openAdd() {
@@ -148,10 +150,10 @@ export default function RFIDManagementPage() {
 
       <Card>
         <CardHeader
-          title="Registered RFID Cards"
+          title="Registered Students"
           badge={
             <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "rgba(22,163,74,.10)", color: "#15803d" }}>
-              {cards.length} cards
+              {students.length} students
             </span>
           }
         />
@@ -159,58 +161,29 @@ export default function RFIDManagementPage() {
           <table className="w-full text-sm">
             <thead style={{ background: "var(--bg-card2)" }}>
               <tr>
-                {["UID", "Cardholder Name", "Role", "Registered", "Status", "Actions"].map(h => (
+                {["Student ID", "Student Name", "RFID UID", "Program", "Status"].map(h => (
                   <th key={h} className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wider" style={{ color: "var(--text-muted)" }}>{h}</th>
                 ))}
               </tr>
             </thead>
-            <tbody aria-busy={loading}>
-              {loading ? (
-                <TableSkeletonRows columns={6} />
-              ) : filtered.length === 0 ? (
-                <tr><td colSpan={6} className="px-4 py-10 text-center text-sm" style={{ color: "var(--text-muted)" }}>{search ? "No cards match your search" : "No cards registered yet"}</td></tr>
-              ) : filtered.map(card => (
+            <tbody aria-busy={studentsLoading}>
+              {studentsLoading ? (
+                <TableSkeletonRows columns={5} />
+              ) : filteredStudents.length === 0 ? (
+                <tr><td colSpan={5} className="px-4 py-10 text-center text-sm" style={{ color: "var(--text-muted)" }}>{search ? "No students match your search" : "No students registered yet"}</td></tr>
+              ) : filteredStudents.map(student => (
                 <tr
-                  key={card.key}
+                  key={student.key}
                   className="transition-colors"
                   style={{ borderBottom: "1px solid var(--border)" }}
                   onMouseEnter={e => (e.currentTarget.style.background = "#f0fdf4")}
                   onMouseLeave={e => (e.currentTarget.style.background = "transparent")}
                 >
-                  <td className="px-4 py-3"><code className="text-xs" style={{ color: "var(--text-muted)" }}>{card.uid}</code></td>
-                  <td className="px-4 py-3 font-medium" style={{ color: "var(--text-main)" }}>{card.name}</td>
-                  <td className="px-4 py-3 text-sm" style={{ color: "var(--text-muted)" }}>{card.role || "—"}</td>
-                  <td className="px-4 py-3 text-xs" style={{ color: "var(--text-muted)" }}>{formatTime(card.createdAt)}</td>
-                  <td className="px-4 py-3"><ActiveBadge active={card.active} /></td>
-                  <td className="px-4 py-3">
-                    <div className="flex gap-1.5">
-                      <button
-                        onClick={() => openEdit(card)}
-                        className="w-8 h-8 rounded-lg flex items-center justify-center transition-colors hover:bg-green-50"
-                        style={{ border: "1px solid var(--border)", color: "var(--text-muted)" }} title="Edit"
-                      >
-                        <Pencil className="w-3.5 h-3.5" />
-                      </button>
-                      <button
-                        onClick={() => handleToggle(card)}
-                        className="w-8 h-8 rounded-lg flex items-center justify-center transition-colors hover:bg-green-50"
-                        style={{ border: "1px solid var(--border)", color: "var(--text-muted)" }}
-                        title={card.active ? "Disable" : "Enable"}
-                      >
-                        {card.active
-                          ? <ToggleRight className="w-4 h-4" style={{ color: "#16a34a" }} />
-                          : <ToggleLeft className="w-4 h-4" style={{ color: "var(--text-muted)" }} />
-                        }
-                      </button>
-                      <button
-                        onClick={() => setDeleteTarget(card)}
-                        className="w-8 h-8 rounded-lg flex items-center justify-center transition-colors hover:bg-red-50"
-                        style={{ border: "1px solid var(--border)", color: "var(--text-muted)" }} title="Delete"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  </td>
+                  <td className="px-4 py-3"><code className="text-xs" style={{ color: "var(--text-muted)" }}>{student.studentId}</code></td>
+                  <td className="px-4 py-3 font-medium" style={{ color: "var(--text-main)" }}>{student.name}</td>
+                  <td className="px-4 py-3"><code className="text-xs" style={{ color: "var(--text-muted)" }}>{student.rfidUid || "Not assigned"}</code></td>
+                  <td className="px-4 py-3 text-sm" style={{ color: "var(--text-muted)" }}>{student.program || "—"}</td>
+                  <td className="px-4 py-3"><ActiveBadge active={Boolean(student.rfidUid) && !student.archived} /></td>
                 </tr>
               ))}
             </tbody>

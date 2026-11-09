@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { ref, onValue, push, update, remove, off, get, query, orderByChild, limitToLast } from "firebase/database";
 import { db } from "@/lib/firebase";
-import type { RFIDCard, AccessLog, Device, Stats, SystemSettings } from "@/lib/types";
+import type { RFIDCard, AccessLog, Device, Stats, SystemSettings, StudentRecord } from "@/lib/types";
 
 // ── Stats ────────────────────────────────────────────────────────────────────
 // Derived live from /accessLogs so it always matches the actual log count.
@@ -46,6 +46,26 @@ export function useCards() {
   const deleteCard = useCallback((key: string) => remove(ref(db, `/authorizedCards/${key}`)), []);
 
   return { cards, loading, addCard, updateCard, deleteCard };
+}
+
+export function useRegisteredStudents() {
+  const [students, setStudents] = useState<StudentRecord[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const r = ref(db, "/students");
+    const unsub = onValue(r, (snap) => {
+      const data = snap.val() ?? {};
+      setStudents(Object.entries(data).map(([key, value]) => ({
+        key,
+        ...(value as Omit<StudentRecord, "key">),
+      })));
+      setLoading(false);
+    });
+    return () => off(r, "value", unsub);
+  }, []);
+
+  return { students, loading };
 }
 
 // ── Access Logs ───────────────────────────────────────────────────────────────

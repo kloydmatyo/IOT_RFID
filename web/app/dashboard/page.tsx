@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { IdCardIcon, CheckCircle, XCircle, CreditCard, Clock, ChevronRight } from "lucide-react";
 import type { Chart as ChartInstance } from "chart.js";
-import { useStats, useCards, useRecentLogs, useLogs } from "@/hooks/useFirebase";
+import { useStats, useRegisteredStudents, useRecentLogs, useLogs } from "@/hooks/useFirebase";
 import { formatTime } from "@/lib/utils";
 import { subDays, format, parseISO, isValid } from "date-fns";
 import { useTestClock } from "@/context/TestClockContext";
@@ -48,7 +48,7 @@ function initials(name: string) {
 
 export default function DashboardPage() {
   const stats = useStats();
-  const { cards } = useCards();
+  const { students } = useRegisteredStudents();
   const recentLogs = useRecentLogs();
   const { logs: allLogs } = useLogs(500);
   const donutRef = useRef<HTMLCanvasElement>(null);
@@ -65,6 +65,7 @@ export default function DashboardPage() {
   const total = stats.authorizedCount + stats.unauthorizedCount;
   const authPct = total ? Math.round((stats.authorizedCount / total) * 100) : 0;
   const unauthPct = total ? 100 - authPct : 0;
+  const registeredCardCount = students.filter(student => Boolean(student.rfidUid) && !student.archived).length;
 
   /* ---- donut chart ---- */
   useEffect(() => {
@@ -216,7 +217,7 @@ export default function DashboardPage() {
     { label: "Total scans", value: total, hint: "All time", icon: IdCardIcon, color: C.blue, soft: C.blueSoft },
     { label: "Authorized", value: stats.authorizedCount, hint: `${authPct}% of scans`, icon: CheckCircle, color: C.green, soft: C.greenSoft },
     { label: "Unauthorized", value: stats.unauthorizedCount, hint: `${unauthPct}% of scans`, icon: XCircle, color: C.red, soft: C.redSoft },
-    { label: "Registered cards", value: cards.length, hint: "RFID cards in the system", icon: CreditCard, color: C.purple, soft: C.purpleSoft },
+    { label: "Registered cards", value: registeredCardCount, hint: "RFID cards in the system", icon: CreditCard, color: C.purple, soft: C.purpleSoft },
   ];
 
   return (
