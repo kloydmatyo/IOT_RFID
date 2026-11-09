@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import type { FormEvent } from "react";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
@@ -35,6 +35,8 @@ import {
   Loader2,
 } from "lucide-react";
 import { TEACHER_SESSION_KEY } from "@/lib/mockTeacher";
+import { db } from "@/lib/firebase";
+import { get, ref } from "firebase/database";
 import LoadingSkeleton from "@/components/LoadingSkeleton";
 import TeacherSidebar from "@/components/teacher/TeacherSidebar";
 import {
@@ -61,6 +63,7 @@ import {
   paginate,
   toMin,
   EMAIL_DOMAIN,
+  LATE_GRACE_MIN,
 } from "@/lib/teacher";
 import type { StatusFilter, Tab } from "@/lib/teacher";
 import { useTestClock } from "@/context/TestClockContext";
@@ -94,13 +97,11 @@ function msToMin(ms: number | string) {
   return d.getHours() * 60 + d.getMinutes();
 }
 
-const LATE_GRACE_MIN = 10;
-
 function deriveStatus(
   timeInMs: number,
   cls: ClassRecord
 ): "present" | "late" {
-  const tapMin = msToMin(timeInMs);
+  const tapMin = msToMin(timeInMs) ?? 0;
   const startMin = toMin(cls.start);
   return tapMin > startMin + LATE_GRACE_MIN ? "late" : "present";
 }
@@ -123,7 +124,7 @@ export default function TeacherPage() {
   /* ── Firebase data ── */
   const { classes, loading: classesLoading, addClass, updateClass, deleteClass } = useClasses(teacherUid);
   const { students, loading: studentsLoading, addStudent, updateStudent, deleteStudent } = useStudents(teacherUid);
-  const { session: activeSession, startSession, stopSession } = useActiveSession();
+  const { session: activeSession, startSession, stopSession, setScanMode } = useActiveSession();
 
   const { now: testNow } = useTestClock();
   const today = toISODate(testNow ?? new Date());
@@ -144,10 +145,14 @@ export default function TeacherPage() {
   const allRecords = useMemo(() => {
     const map = new Map<string, AttendanceRecord>();
     [...historyRecords, ...todayRecords].forEach(r => {
-      map.set(`${r.classKey}|${r.date}|${r.studentKey}`, r);
+      const cls = activeClasses.find(c => c.key === r.classKey);
+      const normalized = r.status === "incomplete" && r.timeInMs !== undefined && r.timeOutMs !== undefined && cls
+        ? { ...r, status: deriveStatus(Number(r.timeInMs), cls) }
+        : r;
+      map.set(`${r.classKey}|${r.date}|${r.studentKey}`, normalized);
     });
     return Array.from(map.values());
-  }, [historyRecords, todayRecords]);
+  }, [historyRecords, todayRecords, activeClasses]);
 
   /* ── UI state ── */
   const [collapsed, setCollapsed] = useState(false);
@@ -235,6 +240,7 @@ export default function TeacherPage() {
 
   // active session UI
   const [sessionSaving, setSessionSaving] = useState(false);
+  const autoClosedSession = useRef<string | null>(null);
 
   /* ── start collapsed on small screens ── */
   useEffect(() => {
@@ -321,7 +327,7 @@ export default function TeacherPage() {
         cls: activeClasses.find(c => c.key === r.classKey),
       }))
       .filter((x): x is { rec: AttendanceRecord; student: StudentRecord; cls: ClassRecord } => !!x.student && !!x.cls)
-      .sort((a, b) => (b.rec.timeInMs ?? 0) - (a.rec.timeInMs ?? 0))
+      .sort((a, b) => (Number(b.rec.timeInMs ?? 0)) - (Number(a.rec.timeInMs ?? 0)))
       .slice(0, 6);
   }, [todayRecords, activeStudents, activeClasses]);
 
@@ -596,11 +602,19 @@ export default function TeacherPage() {
   }
 
   /* ── active session ── */
-  async function handleStartSession(cls: ClassRecord) {
+  async function handleSetScanMode(cls: ClassRecord, scanMode: "timeIn" | "timeOut") {
     setSessionSaving(true);
     try {
-      await startSession(cls, teacherUid!);
-      notify(`Started recording attendance for ${cls.name} · ${cls.code}.`);
+      if (activeSession) {
+        if (activeSession.classKey !== cls.key) {
+          notify("Time Out the current class session first.", "error");
+          return;
+        }
+        await setScanMode(scanMode);
+      } else {
+        await startSession(cls, teacherUid!, scanMode);
+      }
+      notify(`${scanMode === "timeIn" ? "Time In" : "Time Out"} scanning is ready for ${cls.name} · ${cls.code}.`);
     } catch {
       notify("Failed to start session.", "error");
     } finally {
@@ -611,14 +625,81 @@ export default function TeacherPage() {
   async function handleStopSession() {
     setSessionSaving(true);
     try {
-      await stopSession();
-      notify("Attendance session stopped.");
+      if (activeSession) {
+        const date = toISODate(testNow ?? new Date());
+        const classKey = activeSession.classKey;
+        const finalized = await finalizeAttendance(classKey, date);
+        await stopSession();
+
+        notify(
+          finalized.absent + finalized.incomplete > 0
+            ? `Session stopped. ${finalized.absent} absent, ${finalized.incomplete} incomplete.`
+            : "Session stopped."
+        );
+      } else {
+        await stopSession();
+        notify("Session stopped.");
+      }
     } catch {
       notify("Failed to stop session.", "error");
     } finally {
       setSessionSaving(false);
     }
   }
+
+  async function finalizeAttendance(classKey: string, date: string) {
+    const enrolled = activeStudents.filter(s => s.classKeys?.includes(classKey));
+    const snap = await get(ref(db, `/attendance/${classKey}/${date}`));
+    const records = snap.exists() ? snap.val() as Record<string, AttendanceRecord> : {};
+    const writes: Promise<void>[] = [];
+    let absent = 0;
+    let incomplete = 0;
+
+    for (const student of enrolled) {
+      const record = records[student.key];
+      if (!record) {
+        absent++;
+        writes.push(writeAttendanceRecord({
+          studentKey: student.key,
+          studentId: student.studentId,
+          studentName: student.name,
+          classKey,
+          date,
+          status: "absent",
+          writtenBy: "rfid",
+        }));
+      } else if (record.timeInMs !== undefined && record.timeOutMs === undefined && record.status !== "incomplete") {
+        incomplete++;
+        writes.push(writeAttendanceRecord({
+          ...record,
+          status: "incomplete",
+          writtenBy: "rfid",
+        }));
+      }
+    }
+
+    await Promise.all(writes);
+    return { absent, incomplete };
+  }
+
+  useEffect(() => {
+    if (!activeSession || !testNow) return;
+
+    const cls = activeClasses.find(c => c.key === activeSession.classKey);
+    if (!cls) return;
+
+    const nowMin = testNow.getHours() * 60 + testNow.getMinutes();
+    const endMin = toMin(activeSession.classEnd || cls.end);
+    if (nowMin < endMin + LATE_GRACE_MIN) return;
+
+    const sessionKey = `${activeSession.classKey}|${activeSession.startedAt}`;
+    if (autoClosedSession.current === sessionKey) return;
+    autoClosedSession.current = sessionKey;
+    void finalizeAttendance(activeSession.classKey, toISODate(testNow));
+  // The grace-period finalization marks missing students absent and unfinished
+  // time-in records incomplete, but does not stop the session.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSession, activeClasses, testNow]);
 
   /* ── export CSV ── */
   function exportCsv() {
@@ -981,7 +1062,7 @@ export default function TeacherPage() {
                 className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white disabled:opacity-60"
                 style={{ background: C.red }}>
                 {sessionSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Square className="w-4 h-4" />}
-                Stop session
+                End Session
               </button>
             </div>
           )}
@@ -1012,7 +1093,7 @@ export default function TeacherPage() {
                 })}
               </div>
 
-              {/* Class cards with Start Session button */}
+              {/* Class cards with Time In / Time Out controls */}
               <div>
                 <h2 className="text-base font-semibold mb-3" style={{ color: C.text }}>Today&apos;s attendance by class</h2>
                 <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
@@ -1083,22 +1164,26 @@ export default function TeacherPage() {
                               <span className="font-medium text-xs" style={{ color: C.muted }}> · {roster.length} students</span>
                             </p>
                           </div>
-                          {isActive ? (
-                            <button onClick={handleStopSession} disabled={sessionSaving}
-                              className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg"
-                              style={{ background: "#fee2e2", color: C.red }}>
-                              {sessionSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Square className="w-3.5 h-3.5" />}
-                              Stop
-                            </button>
-                          ) : (
-                            <button onClick={() => handleStartSession(c)} disabled={sessionSaving || (!!activeSession && activeSession.active)}
-                              title={activeSession?.active ? "Stop the current session first" : "Start recording attendance"}
+                          <div className="flex items-center gap-2">
+                            <button
+                              onClick={() => handleSetScanMode(c, "timeIn")}
+                              disabled={sessionSaving || (!!activeSession && activeSession.classKey !== c.key)}
+                              title={activeSession?.classKey === c.key ? "Scan students for Time In" : activeSession ? "Time Out the current class session first" : "Enable Time In scanning"}
                               className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg disabled:opacity-40"
                               style={{ background: C.greenSoft, color: C.greenDark }}>
-                              {sessionSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
-                              Start
+                              {sessionSaving && (!activeSession || activeSession.scanMode === "timeIn") ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                              Time In
                             </button>
-                          )}
+                            <button
+                              onClick={() => handleSetScanMode(c, "timeOut")}
+                              disabled={sessionSaving || (!!activeSession && activeSession.classKey !== c.key)}
+                              title={activeSession?.classKey === c.key ? "Scan students for Time Out" : activeSession ? "Time Out the current class session first" : "Enable Time Out scanning"}
+                              className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg disabled:opacity-40"
+                              style={{ background: "#fee2e2", color: C.red }}>
+                              {sessionSaving && activeSession?.scanMode === "timeOut" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Square className="w-3.5 h-3.5" />}
+                              Time Out
+                            </button>
+                          </div>
                         </div>
                       </div>
                     );
@@ -1214,9 +1299,10 @@ export default function TeacherPage() {
               <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-6">
                 {filteredClasses.map(c => {
                   const count = classStudents(c.key).length;
+                  const isActive = activeSession?.classKey === c.key && activeSession.active;
                   return (
-                    <button key={c.key} onClick={() => { setOpenClassId(c.key); setClassView("attendance"); }}
-                      className="text-left rounded-2xl p-6" style={cardStyle}>
+                    <div key={c.key} onClick={() => { setOpenClassId(c.key); setClassView("attendance"); }}
+                      className="text-left rounded-2xl p-6 cursor-pointer" style={cardStyle}>
                       <div className="flex items-start justify-between">
                         <div className="w-12 h-12 rounded-xl flex items-center justify-center" style={{ background: C.greenSoft }}>
                           <GraduationCap className="w-6 h-6" style={{ color: C.green }} />
@@ -1242,7 +1328,27 @@ export default function TeacherPage() {
                         </div>
                         <ClipboardCheck className="w-4 h-4" style={{ color: C.muted }} />
                       </div>
-                    </button>
+                      <div className="flex items-center gap-2 mt-4" onClick={e => e.stopPropagation()}>
+                        <button
+                          onClick={() => handleSetScanMode(c, "timeIn")}
+                          disabled={sessionSaving || (!!activeSession && activeSession.classKey !== c.key)}
+                          title={isActive ? "Scan students for Time In" : activeSession ? "Time Out the current class session first" : "Enable Time In scanning"}
+                          className="flex-1 flex items-center justify-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg disabled:opacity-40"
+                          style={{ background: C.greenSoft, color: C.greenDark }}>
+                          {sessionSaving && activeSession?.scanMode === "timeIn" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                          Time In
+                        </button>
+                        <button
+                          onClick={() => handleSetScanMode(c, "timeOut")}
+                          disabled={sessionSaving || (!!activeSession && activeSession.classKey !== c.key)}
+                          title={isActive ? "Scan students for Time Out" : activeSession ? "Time Out the current class session first" : "Enable Time Out scanning"}
+                          className="flex-1 flex items-center justify-center gap-1.5 text-xs font-semibold px-3 py-2 rounded-lg disabled:opacity-40"
+                          style={{ background: "#fee2e2", color: C.red }}>
+                          {sessionSaving && activeSession?.scanMode === "timeOut" ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Square className="w-3.5 h-3.5" />}
+                          Time Out
+                        </button>
+                      </div>
+                    </div>
                   );
                 })}
               </div>
@@ -1642,9 +1748,9 @@ export default function TeacherPage() {
 
       {addStudentsOpen && openClassItem && (
         <AddStudentsModal
-          classItem={openClassItem}
+          classItem={{ ...openClassItem, id: openClassItem.key, created: openClassItem.createdAt?.substring(0, 10) ?? "" }}
           students={activeStudents.filter(s => !(s.classKeys ?? []).includes(openClassItem.key)).map(s => ({
-            ...s, id: s.key, classIds: s.classKeys ?? [],
+            ...s, id: s.key, classIds: s.classKeys ?? [], rfid: s.rfidUid ?? "",
           }))}
           search={pickSearch} setSearch={setPickSearch}
           selectedIds={pickIds} setSelectedIds={setPickIds}

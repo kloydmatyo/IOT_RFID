@@ -107,6 +107,7 @@ struct ActiveSession {
   String teacherUid;
   String startedAt;   // ISO timestamp stored by the web app
   String classStart;  // "HH:MM" scheduled class start, e.g. "08:00"
+  String scanMode;    // "timeIn" or "timeOut"
 };
 ActiveSession currentSession;
 
@@ -369,7 +370,7 @@ void syncActiveSession() {
 
   FirebaseJson &json = fbData.jsonObject();
   FirebaseJsonData activeData, classKeyData, classNameData, classCodeData,
-                   teacherData, startedAtData, classStartData;
+                   teacherData, startedAtData, classStartData, scanModeData;
 
   json.get(activeData,     "active");
   json.get(classKeyData,   "classKey");
@@ -378,6 +379,7 @@ void syncActiveSession() {
   json.get(teacherData,    "teacherUid");
   json.get(startedAtData,  "startedAt");
   json.get(classStartData, "classStart");
+  json.get(scanModeData, "scanMode");
 
   bool sessionActive = activeData.success && activeData.boolValue;
 
@@ -394,6 +396,8 @@ void syncActiveSession() {
   currentSession.teacherUid = teacherData.success   ? teacherData.stringValue   : "";
   currentSession.startedAt  = startedAtData.success  ? startedAtData.stringValue : "";
   currentSession.classStart = classStartData.success ? classStartData.stringValue : "";
+  currentSession.scanMode = scanModeData.success && scanModeData.stringValue == "timeOut"
+    ? "timeOut" : "timeIn";
 
   Serial.println("Active session: " + currentSession.className + " / " + currentSession.classKey);
 }
@@ -497,21 +501,24 @@ void writeAttendance(const String &classKey, const String &date,
                      unsigned long long epochMs, const String &status) {
   String path = "/attendance/" + classKey + "/" + date + "/" + student.key;
 
-  // Check if a tap-in record already exists
-  bool existing = false;
+  // A record can exist as an absent placeholder without a time-in.
+  bool existingTapIn = false;
   if (Firebase.getJSON(fbData, path)) {
-    existing = true;
+    FirebaseJson &existingRec = fbData.jsonObject();
+    FirebaseJsonData timeInData;
+    existingRec.get(timeInData, "timeInMs");
+    existingTapIn = timeInData.success;
   }
 
   FirebaseJson rec;
 
-  if (isTapOut && existing) {
+  if (isTapOut && existingTapIn) {
     // Second tap: only update timeOutMs
     rec.set("timeOutMs", (int64_t)epochMs);
     Firebase.updateNode(fbData, path, rec);
     Serial.println("Tap-OUT recorded for: " + student.name);
-  } else if (!existing) {
-    // First tap: create full record
+  } else if (!existingTapIn) {
+    // First tap: create or replace an absent placeholder with a full record.
     rec.set("studentKey",  student.key);
     rec.set("studentId",   student.studentId);
     rec.set("studentName", student.name);
@@ -791,19 +798,32 @@ void loop() {
         handleUnauthorized(uidFormatted, "Not in class");
         uploadAccessLog(uidFormatted, student.name, false, timestamp);
       } else {
-        // Determine tap-in status
+        // Determine whether a real time-in exists. An absent placeholder is
+        // not a valid time-in and must not accept a time-out.
         String attPath = "/attendance/" + currentSession.classKey + "/" + date + "/" + student.key;
-        bool hasTapIn  = Firebase.getJSON(fbData, attPath);
+        bool hasRecord = Firebase.getJSON(fbData, attPath);
+        bool hasTimeIn = false;
         bool hasTapOut = false;
 
-        if (hasTapIn) {
+        if (hasRecord) {
           FirebaseJson &rec = fbData.jsonObject();
-          FirebaseJsonData tapOutData;
+          FirebaseJsonData timeInData, tapOutData;
+          rec.get(timeInData, "timeInMs");
           rec.get(tapOutData, "timeOutMs");
+          hasTimeIn = timeInData.success;
           hasTapOut = tapOutData.success;
         }
 
-        if (!hasTapIn) {
+        if (currentSession.scanMode == "timeOut") {
+          if (hasTimeIn && !hasTapOut) {
+            writeAttendance(currentSession.classKey, date, student, true, epochMs, "");
+            handleTapOut(student.name);
+            uploadAccessLog(uidFormatted, student.name, true, timestamp);
+          } else {
+            showMessage(hasTimeIn ? "Already tapped out" : "No Time-In", student.name.c_str());
+            delay(2000);
+          }
+        } else if (!hasTimeIn) {
           // First tap → tap-in, check lateness against scheduled class start
           String status = "present";
           if (timeReady && currentSession.classStart.length() == 5) {
@@ -821,15 +841,8 @@ void loop() {
           handleAuthorized(student.name, status);
           uploadAccessLog(uidFormatted, student.name, true, timestamp);
 
-        } else if (hasTapIn && !hasTapOut) {
-          // Second tap → tap-out
-          writeAttendance(currentSession.classKey, date, student, true, epochMs, "");
-          handleTapOut(student.name);
-          uploadAccessLog(uidFormatted, student.name, true, timestamp);
-
         } else {
-          // Already has both tap-in and tap-out
-          showMessage("Already tapped", student.name.c_str());
+          showMessage(hasTapOut ? "Already tapped out" : "Already tapped in", student.name.c_str());
           delay(2000);
         }
       }

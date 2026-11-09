@@ -111,5 +111,7 @@ export interface ActiveSession {
   teacherUid: string;
   startedAt: string;  // ISO timestamp when teacher clicked Start
   classStart: string; // "HH:MM" — the scheduled class start time
+  classEnd: string;   // "HH:MM" — the scheduled class end time
+  scanMode: "timeIn" | "timeOut";
   active: boolean;
 }

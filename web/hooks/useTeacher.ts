@@ -189,7 +189,7 @@ export function useActiveSession() {
   }, []);
 
   const startSession = useCallback(
-    async (cls: ClassRecord, teacherUid: string) => {
+    async (cls: ClassRecord, teacherUid: string, scanMode: ActiveSession["scanMode"] = "timeIn") => {
       const session: ActiveSession = {
         classKey: cls.key,
         className: cls.name,
@@ -197,6 +197,8 @@ export function useActiveSession() {
         teacherUid,
         startedAt: new Date().toISOString(),
         classStart: cls.start,   // e.g. "08:00"
+        classEnd: cls.end,       // e.g. "09:00"
+        scanMode,
         active: true,
       };
       await set(ref(db, `/activeSessions/${DEVICE_ID}`), session);
@@ -208,7 +210,11 @@ export function useActiveSession() {
     await update(ref(db, `/activeSessions/${DEVICE_ID}`), { active: false });
   }, []);
 
-  return { session, startSession, stopSession };
+  const setScanMode = useCallback(async (scanMode: ActiveSession["scanMode"]) => {
+    await update(ref(db, `/activeSessions/${DEVICE_ID}`), { scanMode });
+  }, []);
+
+  return { session, startSession, stopSession, setScanMode };
 }
 
 // ── Live attendance hook for teacher dashboard (today across all classes) ──────
