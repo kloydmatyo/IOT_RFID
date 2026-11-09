@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useCallback } from "react";
 import type { FormEvent } from "react";
 import dynamic from "next/dynamic";
 import { useRouter } from "next/navigation";
@@ -13,7 +13,6 @@ import {
   CheckCircle2,
   Clock,
   AlertTriangle,
-  Trash2,
   Search,
   Plus,
   GraduationCap,
@@ -28,6 +27,12 @@ import {
   ArchiveRestore,
   X,
   BookOpen,
+  Trash2,
+  Wifi,
+  WifiOff,
+  Play,
+  Square,
+  Loader2,
 } from "lucide-react";
 import { TEACHER_SESSION_KEY } from "@/lib/mockTeacher";
 import LoadingSkeleton from "@/components/LoadingSkeleton";
@@ -41,9 +46,6 @@ import {
   initials,
   inputStyle,
   cardStyle,
-  INITIAL_CLASSES,
-  INITIAL_STUDENTS,
-  EMAIL_DOMAIN,
   MAX_LEN,
   MAX_TIME,
   MIN_TIME,
@@ -56,146 +58,202 @@ import {
   STUDENT_NO_RE,
   WEEK_DAYS,
   WORDS_RE,
-  buildDates,
   paginate,
-  seedLogs,
   toMin,
+  EMAIL_DOMAIN,
 } from "@/lib/teacher";
-import type { ClassItem, Log, StatusFilter, Student, StudentModalMode, Tab } from "@/lib/teacher";
+import type { StatusFilter, Tab } from "@/lib/teacher";
+import type { ClassRecord, StudentRecord, AttendanceRecord } from "@/lib/types";
 import Pagination from "@/components/teacher/Pagination";
+import {
+  useClasses,
+  useStudents,
+  useActiveSession,
+  useTodayAttendance,
+  useAttendanceHistory,
+  writeAttendanceRecord,
+} from "@/hooks/useTeacher";
 
 const ClassEditorModal = dynamic(() => import("@/components/teacher/ClassEditorModal"));
-const AddStudentsModal = dynamic(() => import("@/components/teacher/AddStudentsModal"));
-const StudentModal = dynamic(() => import("@/components/teacher/StudentModal"));
+const AddStudentsModal  = dynamic(() => import("@/components/teacher/AddStudentsModal"));
+const StudentModal      = dynamic(() => import("@/components/teacher/StudentModal"));
 
-/* ------------------------------------------------------------------ */
-/* Helpers                                                             */
-/* ------------------------------------------------------------------ */
+// ── helpers ───────────────────────────────────────────────────────────────────
 
-/* ------------------------------------------------------------------ */
-/* Page                                                                */
-/* ------------------------------------------------------------------ */
+function toISODate(d: Date) {
+  return d.toISOString().substring(0, 10);
+}
+
+/** minutes since midnight from an epoch-ms value (handles string or number) */
+function msToMin(ms: number | string) {
+  const n = typeof ms === "string" ? parseInt(ms, 10) : ms;
+  if (!n || isNaN(n)) return undefined;
+  const d = new Date(n);
+  return d.getHours() * 60 + d.getMinutes();
+}
+
+const LATE_GRACE_MIN = 10;
+
+function deriveStatus(
+  timeInMs: number,
+  cls: ClassRecord
+): "present" | "late" {
+  const tapMin = msToMin(timeInMs);
+  const startMin = toMin(cls.start);
+  return tapMin > startMin + LATE_GRACE_MIN ? "late" : "present";
+}
+
+// ── Page ─────────────────────────────────────────────────────────────────────
 
 export default function TeacherPage() {
   const router = useRouter();
-  const [teacher, setTeacher] = useState<{ name: string; email: string } | null>(null);
-  const [collapsed, setCollapsed] = useState(false);
-  const [confirmSignOut, setConfirmSignOut] = useState(false);
-  const [confirmDlg, setConfirmDlg] = useState<{
-    tone: "archive" | "delete";
-    title: string;
-    subject: string;
-    message: string;
-    confirmLabel: string;
-    onConfirm: () => void;
-  } | null>(null);
-  const [toast, setToast] = useState<{ msg: string; kind: "success" | "archive" | "delete" } | null>(null);
-  const notify = (msg: string, kind: "success" | "archive" | "delete" = "success") => setToast({ msg, kind });
-  const [now, setNow] = useState<Date | null>(null);
+  const [teacher, setTeacher] = useState<{ name: string; email: string; uid: string } | null>(null);
 
-  // Dates and demo logs are created on the client after mount (avoids the prerender time error)
-  const [dates, setDates] = useState<{ past: string[]; today: string } | null>(null);
-  const [logs, setLogs] = useState<Log[]>([]);
-  const today = dates?.today ?? "";
-
-  const [classes, setClasses] = useState<ClassItem[]>(INITIAL_CLASSES);
-  const [students, setStudents] = useState<Student[]>(INITIAL_STUDENTS);
-
-  const [tab, setTab] = useState<Tab>("dashboard");
-  const [classSearch, setClassSearch] = useState("");
-  const [openClassId, setOpenClassId] = useState<string | null>(null);
-  const [classView, setClassView] = useState<"attendance" | "students">("attendance");
-  const [rosterSearch, setRosterSearch] = useState("");
-  const [editingClassId, setEditingClassId] = useState<string | null>(null);
-
-  // Archive tab
-  const [archiveView, setArchiveView] = useState<"students" | "classes">("students");
-  const [archiveSearch, setArchiveSearch] = useState("");
-
-  // Add students to the opened class
-  const [addStudentsOpen, setAddStudentsOpen] = useState(false);
-  const [pickIds, setPickIds] = useState<string[]>([]);
-  const [pickSearch, setPickSearch] = useState("");
-
-  // Attendance filters
-  const [fStatus, setFStatus] = useState<StatusFilter>("all");
-  const [fSearch, setFSearch] = useState("");
-  const [fDate, setFDate] = useState("all");
-  const [fClass, setFClass] = useState("all");
-  const [fSection, setFSection] = useState("all");
-  const [fYear, setFYear] = useState("all");
-
-  // Pagination (each table keeps its own page number)
-  const [attPage, setAttPage] = useState(1);
-  const [rosterPage, setRosterPage] = useState(1);
-  const [stuPage, setStuPage] = useState(1);
-  const [arcStuPage, setArcStuPage] = useState(1);
-  const [arcClsPage, setArcClsPage] = useState(1);
-
-  // Add class modal
-  const [showAdd, setShowAdd] = useState(false);
-  const [newName, setNewName] = useState("");
-  const [newCode, setNewCode] = useState("");
-  const [newYear, setNewYear] = useState(1);
-  const [newDays, setNewDays] = useState<string[]>(["Mon", "Wed", "Fri"]);
-  const [newStart, setNewStart] = useState("08:00");
-  const [newEnd, setNewEnd] = useState("09:00");
-  const [newRoom, setNewRoom] = useState("");
-  const [classError, setClassError] = useState("");
-
-  // Students tab: search + add / edit / view modal
-  const [search, setSearch] = useState("");
-  const [fsYear, setFsYear] = useState("all");
-  const [fsSection, setFsSection] = useState("all");
-  const [fsProgram, setFsProgram] = useState("all");
-  const [studentModal, setStudentModal] = useState<{ mode: StudentModalMode; id?: string } | null>(null);
-  const [sFirst, setSFirst] = useState("");
-  const [sLast, setSLast] = useState("");
-  const [sEmail, setSEmail] = useState("");
-  const [sProgram, setSProgram] = useState("");
-  const [sYear, setSYear] = useState(1);
-  const [sSection, setSSection] = useState("");
-  const [sRfid, setSRfid] = useState("");
-  const [sClassIds, setSClassIds] = useState<string[]>([]);
-  const [sError, setSError] = useState("");
-
-  /* ---- session guard (mock teacher login) ---- */
+  /* ── session guard ── */
   useEffect(() => {
     const raw = sessionStorage.getItem(TEACHER_SESSION_KEY);
-    if (!raw) {
-      router.replace("/login");
-      return;
-    }
+    if (!raw) { router.replace("/login"); return; }
     setTeacher(JSON.parse(raw));
   }, [router]);
 
-  /* ---- dates + demo logs (client only) ---- */
-  useEffect(() => {
-    const d = buildDates();
-    setDates(d);
-    setLogs(seedLogs(INITIAL_STUDENTS, INITIAL_CLASSES, d.past, d.today));
-  }, []);
+  const teacherUid = teacher?.uid ?? null;
 
-  /* ---- live clock ---- */
+  /* ── Firebase data ── */
+  const { classes, loading: classesLoading, addClass, updateClass, deleteClass } = useClasses(teacherUid);
+  const { students, loading: studentsLoading, addStudent, updateStudent, deleteStudent } = useStudents(teacherUid);
+  const { session: activeSession, startSession, stopSession } = useActiveSession();
+
+  const today = toISODate(new Date());
+  const activeClasses  = useMemo(() => classes.filter(c => !c.archived), [classes]);
+  const activeStudents = useMemo(() => students.filter(s => !s.archived), [students]);
+  const archivedClasses  = useMemo(() => classes.filter(c => c.archived), [classes]);
+  const archivedStudents = useMemo(() => students.filter(s => s.archived), [students]);
+
+  const activeClassKeys = useMemo(() => activeClasses.map(c => c.key), [activeClasses]);
+
+  /* live today attendance */
+  const todayRecords = useTodayAttendance(activeClassKeys, today);
+
+  /* full history for attendance tab & charts */
+  const { records: historyRecords, loading: historyLoading } = useAttendanceHistory(activeClassKeys);
+
+  /* combine today + history (deduplicate by classKey+date+studentKey) */
+  const allRecords = useMemo(() => {
+    const map = new Map<string, AttendanceRecord>();
+    [...historyRecords, ...todayRecords].forEach(r => {
+      map.set(`${r.classKey}|${r.date}|${r.studentKey}`, r);
+    });
+    return Array.from(map.values());
+  }, [historyRecords, todayRecords]);
+
+  /* ── UI state ── */
+  const [collapsed, setCollapsed] = useState(false);
+  const [tab, setTab] = useState<Tab>("dashboard");
+  const [now, setNow] = useState<Date | null>(null);
+  const [toast, setToast] = useState<{ msg: string; kind: "success" | "archive" | "delete" | "error" } | null>(null);
+  const notify = useCallback((msg: string, kind: "success" | "archive" | "delete" | "error" = "success") => setToast({ msg, kind }), []);
+
+  const [confirmDlg, setConfirmDlg] = useState<{
+    tone: "archive" | "delete";
+    title: string; subject: string; message: string; confirmLabel: string;
+    onConfirm: () => void;
+  } | null>(null);
+  const [confirmSignOut, setConfirmSignOut] = useState(false);
+
+  // classes tab
+  const [classSearch, setClassSearch]   = useState("");
+  const [openClassId, setOpenClassId]   = useState<string | null>(null);
+  const [classView, setClassView]       = useState<"attendance" | "students">("attendance");
+  const [rosterSearch, setRosterSearch] = useState("");
+  const [editingClassId, setEditingClassId] = useState<string | null>(null);
+  const [showAdd, setShowAdd]           = useState(false);
+  const [newName, setNewName]           = useState("");
+  const [newCode, setNewCode]           = useState("");
+  const [newYear, setNewYear]           = useState(1);
+  const [newDays, setNewDays]           = useState<string[]>(["Mon", "Wed", "Fri"]);
+  const [newStart, setNewStart]         = useState("08:00");
+  const [newEnd, setNewEnd]             = useState("09:00");
+  const [newRoom, setNewRoom]           = useState("");
+  const [classError, setClassError]     = useState("");
+  const [classSaving, setClassSaving]   = useState(false);
+
+  // students tab
+  const [search, setSearch]       = useState("");
+  const [fsYear, setFsYear]       = useState("all");
+  const [fsSection, setFsSection] = useState("all");
+  const [fsProgram, setFsProgram] = useState("all");
+  const [studentModal, setStudentModal] = useState<{ mode: "add" | "edit" | "view"; id?: string } | null>(null);
+  const [sFirst, setSFirst]   = useState("");
+  const [sLast, setSLast]     = useState("");
+  const [sEmail, setSEmail]   = useState("");
+  const [sProgram, setSProgram] = useState("");
+  const [sYear, setSYear]     = useState(1);
+  const [sSection, setSSection] = useState("");
+  const [sRfid, setSRfid]     = useState("");
+  const [sClassIds, setSClassIds] = useState<string[]>([]);
+  const [sError, setSError]   = useState("");
+  const [stuSaving, setStuSaving] = useState(false);
+
+  // add-students-to-class modal
+  const [addStudentsOpen, setAddStudentsOpen] = useState(false);
+  const [pickIds, setPickIds]     = useState<string[]>([]);
+  const [pickSearch, setPickSearch] = useState("");
+
+  // attendance filters
+  const [fStatus, setFStatus]   = useState<StatusFilter>("all");
+  const [fSearch, setFSearch]   = useState("");
+  const [fDate, setFDate]       = useState("all");
+  const [fClass, setFClass]     = useState("all");
+  const [fSection, setFSection] = useState("all");
+  const [fYear, setFYear]       = useState("all");
+
+  // edit attendance record modal
+  const [editRec, setEditRec] = useState<{
+    rec: AttendanceRecord;
+    student: StudentRecord;
+    cls: ClassRecord;
+  } | null>(null);
+  const [editDate,    setEditDate]    = useState("");
+  const [editTimeIn,  setEditTimeIn]  = useState("");
+  const [editTimeOut, setEditTimeOut] = useState("");
+  const [editStatus,  setEditStatus]  = useState<AttendanceRecord["status"]>("present");
+  const [editSaving,  setEditSaving]  = useState(false);
+  const [editError,   setEditError]   = useState("");
+
+  // pagination
+  const [attPage, setAttPage]     = useState(1);
+  const [rosterPage, setRosterPage] = useState(1);
+  const [stuPage, setStuPage]     = useState(1);
+  const [arcStuPage, setArcStuPage] = useState(1);
+  const [arcClsPage, setArcClsPage] = useState(1);
+
+  // archive tab
+  const [archiveView, setArchiveView]   = useState<"students" | "classes">("students");
+  const [archiveSearch, setArchiveSearch] = useState("");
+
+  // active session UI
+  const [sessionSaving, setSessionSaving] = useState(false);
+
+  /* ── live clock ── */
   useEffect(() => {
     setNow(new Date());
     const t = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(t);
   }, []);
 
-  /* ---- start collapsed on small screens ---- */
+  /* ── start collapsed on small screens ── */
   useEffect(() => {
     if (window.innerWidth < 768) setCollapsed(true);
   }, []);
 
-  /* ---- go back to page 1 whenever a filter or search changes ---- */
+  /* ── reset pages on filter change ── */
   useEffect(() => setAttPage(1), [fStatus, fSearch, fDate, fClass, fSection, fYear, openClassId, tab]);
   useEffect(() => setRosterPage(1), [rosterSearch, openClassId, classView]);
   useEffect(() => setStuPage(1), [search, fsYear, fsSection, fsProgram]);
   useEffect(() => setArcStuPage(1), [archiveSearch, archiveView]);
   useEffect(() => setArcClsPage(1), [archiveSearch, archiveView]);
 
-  /* ---- auto-hide the toast ---- */
+  /* ── auto-hide toast ── */
   useEffect(() => {
     if (!toast) return;
     const t = setTimeout(() => setToast(null), 3500);
@@ -207,79 +265,99 @@ export default function TeacherPage() {
     router.replace("/login");
   }
 
-  /* ---- active vs archived ---- */
-  const activeClasses = useMemo(() => classes.filter(c => !c.archived), [classes]);
-  const activeStudents = useMemo(() => students.filter(s => !s.archived), [students]);
-  const archivedClasses = useMemo(() => classes.filter(c => c.archived), [classes]);
-  const archivedStudents = useMemo(() => students.filter(s => s.archived), [students]);
+  /* ── derived helpers ── */
+  const classStudents = useCallback(
+    (cKey: string) => activeStudents.filter(s => s.classKeys?.includes(cKey)),
+    [activeStudents]
+  );
 
-  /* ---- derived data ---- */
-  const classStudents = (cId: string) => activeStudents.filter(s => s.classIds.includes(cId));
+  /** Attendance records for a specific class on a given date */
+  const recordsFor = useCallback(
+    (classKey: string, date: string) =>
+      allRecords.filter(r => r.classKey === classKey && r.date === date),
+    [allRecords]
+  );
 
-  function pairStats(cId: string, sId: string) {
-    const mine = logs.filter(l => l.classId === cId && l.studentId === sId);
-    const absent = mine.filter(l => l.status === "absent").length;
-    const late = mine.filter(l => l.status === "late").length;
-    const total = mine.length;
-    const rate = total === 0 ? 0 : Math.round(((total - absent) / total) * 100);
+  /** Attendance stats for one student across one class */
+  function pairStats(classKey: string, studentKey: string) {
+    const mine = allRecords.filter(r => r.classKey === classKey && r.studentKey === studentKey);
+    const absent = mine.filter(r => r.status === "absent").length;
+    const late   = mine.filter(r => r.status === "late").length;
+    const total  = mine.length;
+    const rate   = total === 0 ? 0 : Math.round(((total - absent) / total) * 100);
     return { absent, late, total, rate };
   }
 
+  /* ── dashboard overview ── */
   const overview = useMemo(() => {
     let present = 0, notTapped = 0, totalAbsences = 0;
     for (const c of activeClasses) {
-      const roster = activeStudents.filter(s => s.classIds.includes(c.id));
+      const roster = classStudents(c.key);
       for (const s of roster) {
-        const todayLog = logs.find(l => l.classId === c.id && l.studentId === s.id && l.date === today);
-        if (todayLog && todayLog.status !== "absent") present++;
+        const todayRec = todayRecords.find(r => r.classKey === c.key && r.studentKey === s.key);
+        if (todayRec && todayRec.status !== "absent") present++;
         else notTapped++;
-        totalAbsences += logs.filter(l => l.classId === c.id && l.studentId === s.id && l.status === "absent").length;
+        totalAbsences += allRecords.filter(r => r.classKey === c.key && r.studentKey === s.key && r.status === "absent").length;
       }
     }
     return { present, notTapped, totalAbsences };
-  }, [logs, activeStudents, activeClasses, today]);
+  }, [todayRecords, allRecords, activeClasses, classStudents]);
 
   const needsAttention = useMemo(() => {
-    const list: { student: Student; cls: ClassItem; absent: number; rate: number }[] = [];
+    const list: { student: StudentRecord; cls: ClassRecord; absent: number; rate: number }[] = [];
     for (const c of activeClasses) {
-      for (const s of activeStudents.filter(st => st.classIds.includes(c.id))) {
-        const mine = logs.filter(l => l.classId === c.id && l.studentId === s.id);
-        const absent = mine.filter(l => l.status === "absent").length;
-        const rate = mine.length === 0 ? 0 : Math.round(((mine.length - absent) / mine.length) * 100);
-        if (absent >= 3 || (mine.length >= 3 && rate < 75)) {
+      for (const s of classStudents(c.key)) {
+        const { absent, rate, total } = pairStats(c.key, s.key);
+        if (absent >= 3 || (total >= 3 && rate < 75)) {
           list.push({ student: s, cls: c, absent, rate });
         }
       }
     }
     return list.sort((a, b) => b.absent - a.absent);
-  }, [logs, activeStudents, activeClasses]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [allRecords, activeClasses, activeStudents]);
 
-  // Attendance rows = logs joined with student + class (archived ones are hidden)
-  const rows = useMemo(() => {
-    return logs
-      .map(l => ({
-        log: l,
-        student: activeStudents.find(s => s.id === l.studentId),
-        cls: activeClasses.find(c => c.id === l.classId),
+  const recentTaps = useMemo(() => {
+    return todayRecords
+      .filter(r => r.timeInMs !== undefined)
+      .map(r => ({
+        rec: r,
+        student: activeStudents.find(s => s.key === r.studentKey),
+        cls: activeClasses.find(c => c.key === r.classKey),
       }))
-      .filter((r): r is { log: Log; student: Student; cls: ClassItem } => !!r.student && !!r.cls);
-  }, [logs, activeStudents, activeClasses]);
+      .filter((x): x is { rec: AttendanceRecord; student: StudentRecord; cls: ClassRecord } => !!x.student && !!x.cls)
+      .sort((a, b) => (b.rec.timeInMs ?? 0) - (a.rec.timeInMs ?? 0))
+      .slice(0, 6);
+  }, [todayRecords, activeStudents, activeClasses]);
 
-  // Rows after every filter EXCEPT the status chip (so the chip counts stay meaningful)
-  // When a class is opened inside the Classes tab, only that class's records are used
+  /* ── attendance rows for table (joined) ── */
+  const rows = useMemo(() => {
+    return allRecords
+      .map(r => ({
+        rec: r,
+        student: activeStudents.find(s => s.key === r.studentKey),
+        cls: activeClasses.find(c => c.key === r.classKey),
+      }))
+      .filter((x): x is { rec: AttendanceRecord; student: StudentRecord; cls: ClassRecord } => !!x.student && !!x.cls);
+  }, [allRecords, activeStudents, activeClasses]);
+
   const scopeId = tab === "classes" ? openClassId : null;
+  const dateOptions = Array.from(new Set(allRecords.map(r => r.date))).sort().reverse();
+  const classCodes  = Array.from(new Set(activeClasses.map(c => c.code)));
+  const sections    = Array.from(new Set(activeClasses.map(c => c.name)));
+  const years       = Array.from(new Set(activeClasses.map(c => c.year))).sort();
 
   const baseRows = useMemo(() => {
     const q = fSearch.trim().toLowerCase();
     return rows.filter(r => {
-      if (q && !r.student.name.toLowerCase().includes(q) && !r.student.id.includes(q)) return false;
-      if (fDate !== "all" && r.log.date !== fDate) return false;
+      if (q && !r.student.name.toLowerCase().includes(q) && !r.student.studentId.includes(q)) return false;
+      if (fDate !== "all" && r.rec.date !== fDate) return false;
       if (scopeId) {
-        if (r.cls.id !== scopeId) return false;
+        if (r.cls.key !== scopeId) return false;
       } else {
-        if (fClass !== "all" && r.cls.code !== fClass) return false;
+        if (fClass   !== "all" && r.cls.code !== fClass) return false;
         if (fSection !== "all" && r.cls.name !== fSection) return false;
-        if (fYear !== "all" && String(r.cls.year) !== fYear) return false;
+        if (fYear    !== "all" && String(r.cls.year) !== fYear) return false;
       }
       return true;
     });
@@ -287,101 +365,47 @@ export default function TeacherPage() {
 
   const chipCounts = useMemo(() => {
     const c = { all: baseRows.length, present: 0, late: 0, absent: 0, incomplete: 0 };
-    for (const r of baseRows) c[r.log.status]++;
+    for (const r of baseRows) c[r.rec.status]++;
     return c;
   }, [baseRows]);
 
   const visibleRows = useMemo(() => {
-    const list = fStatus === "all" ? baseRows : baseRows.filter(r => r.log.status === fStatus);
+    const list = fStatus === "all" ? baseRows : baseRows.filter(r => r.rec.status === fStatus);
     return [...list].sort((a, b) => {
-      if (a.log.date !== b.log.date) return a.log.date < b.log.date ? 1 : -1;
+      if (a.rec.date !== b.rec.date) return a.rec.date < b.rec.date ? 1 : -1;
       return a.student.name.localeCompare(b.student.name);
     });
   }, [baseRows, fStatus]);
 
-  const classCodes = Array.from(new Set(activeClasses.map(c => c.code)));
-  const sections = Array.from(new Set(activeClasses.map(c => c.name)));
-  const years = Array.from(new Set(activeClasses.map(c => c.year))).sort();
-  const dateOptions = Array.from(new Set(logs.map(l => l.date))).sort().reverse();
-
-  /* ---- actions ---- */
-  function openClass(cls: ClassItem) {
-    setFStatus("all");
-    setFSearch("");
-    setFDate("all");
-    setOpenClassId(cls.id);
-    setClassView("attendance");
-    setRosterSearch("");
-    setTab("classes");
-  }
-
-  function exportCsv() {
-    const header = ["Student", "Student ID", "Class", "Section", "Date", "Status", "Time In", "Time Out", "Duration"];
-    const lines = visibleRows.map(r =>
-      [
-        r.student.name,
-        r.student.id,
-        r.cls.code,
-        r.cls.name,
-        fmtDay(r.log.date),
-        STATUS_META[r.log.status].label,
-        fmtTime(r.log.timeIn),
-        fmtTime(r.log.timeOut),
-        fmtDuration(r.log.timeIn, r.log.timeOut),
-      ]
-        .map(v => `"${String(v).replace(/"/g, '""')}"`)
-        .join(",")
-    );
-    const blob = new Blob([[header.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `attendance-${today}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
-  }
-
+  /* ── class CRUD ── */
   function resetClassForm() {
-    setNewName("");
-    setNewCode("");
-    setNewYear(1);
+    setNewName(""); setNewCode(""); setNewYear(1);
     setNewDays(["Mon", "Wed", "Fri"]);
-    setNewStart("08:00");
-    setNewEnd("09:00");
-    setNewRoom("");
-    setClassError("");
+    setNewStart("08:00"); setNewEnd("09:00");
+    setNewRoom(""); setClassError("");
   }
 
-  function openAddClass() {
-    resetClassForm();
-    setEditingClassId(null);
-    setShowAdd(true);
-  }
+  function openAddClass() { resetClassForm(); setEditingClassId(null); setShowAdd(true); }
 
-  function openEditClass(c: ClassItem) {
-    setClassError("");
-    setEditingClassId(c.id);
-    setNewName(c.name);
-    setNewCode(c.code);
-    setNewYear(c.year);
+  function openEditClass(c: ClassRecord) {
+    setClassError(""); setEditingClassId(c.key);
+    setNewName(c.name); setNewCode(c.code); setNewYear(c.year);
     const parsedDays = c.schedule.replace(/\s*\d{1,2}:\d{2}.*$/, "");
     setNewDays(parsedDays.split("/").filter(d => WEEK_DAYS.includes(d)));
-    setNewStart(c.start);
-    setNewEnd(c.end);
+    setNewStart(c.start); setNewEnd(c.end);
     setNewRoom(c.room === "No room set" ? "" : c.room);
     setShowAdd(true);
   }
 
-  function handleAddClass(e: FormEvent) {
+  async function handleAddClass(e: FormEvent) {
     e.preventDefault();
     setClassError("");
     const name = newName.trim();
     const code = newCode.trim();
     const room = newRoom.trim();
-
     if (!name || !WORDS_RE.test(name)) return setClassError("Class name: letters and numbers only.");
-    if (!code || !CODE_RE.test(code)) return setClassError("Subject code: letters and numbers only, no spaces.");
-    if (room && !WORDS_RE.test(room)) return setClassError("Room: letters and numbers only.");
+    if (!code || !CODE_RE.test(code))  return setClassError("Subject code: letters and numbers only, no spaces.");
+    if (room && !WORDS_RE.test(room))  return setClassError("Room: letters and numbers only.");
     if (name.length > MAX_LEN || code.length > MAX_LEN || room.length > MAX_LEN)
       return setClassError(`Maximum of ${MAX_LEN} characters per field.`);
     if (newDays.length === 0) return setClassError("Select at least one class day.");
@@ -394,233 +418,301 @@ export default function TeacherPage() {
     const schedule = `${daysText} ${fmtTime(toMin(newStart))}-${fmtTime(toMin(newEnd))}`;
     const roomValue = room || "No room set";
 
-    if (editingClassId) {
-      setClasses(prev =>
-        prev.map(c =>
-          c.id === editingClassId
-            ? { ...c, name, code: code.toUpperCase(), year: newYear, schedule, start: newStart, end: newEnd, room: roomValue }
-            : c
-        )
-      );
-    } else {
-      setClasses(prev => [
-        { id: `c${Date.now()}`, name, code: code.toUpperCase(), year: newYear, schedule, start: newStart, end: newEnd, room: roomValue, created: today },
-        ...prev,
-      ]);
+    setClassSaving(true);
+    try {
+      if (editingClassId) {
+        await updateClass(editingClassId, { name, code: code.toUpperCase(), year: newYear, schedule, start: newStart, end: newEnd, room: roomValue });
+        notify(`Updated ${name} · ${code.toUpperCase()}.`);
+      } else {
+        await addClass({ teacherUid: teacherUid!, name, code: code.toUpperCase(), year: newYear, schedule, start: newStart, end: newEnd, room: roomValue, createdAt: new Date().toISOString() });
+        notify(`Added ${name} · ${code.toUpperCase()}.`);
+      }
+      resetClassForm(); setEditingClassId(null); setShowAdd(false);
+    } catch {
+      setClassError("Failed to save. Please try again.");
+    } finally {
+      setClassSaving(false);
     }
-    notify(editingClassId ? `Successfully updated ${name} · ${code.toUpperCase()}.` : `Successfully added ${name} · ${code.toUpperCase()}.`);
-    resetClassForm();
-    setEditingClassId(null);
-    setShowAdd(false);
   }
 
-  /* ---- archive actions: classes ---- */
-  function archiveClass(c: ClassItem) {
+  function archiveClass(c: ClassRecord) {
     setConfirmDlg({
-      tone: "archive",
-      title: "Archive this class?",
-      subject: `${c.name} · ${c.code}`,
+      tone: "archive", title: "Archive this class?", subject: `${c.name} · ${c.code}`,
       message: "It will be hidden from your lists. You can restore it later from the Archive tab.",
       confirmLabel: "Archive",
-      onConfirm: () => {
-        setClasses(prev => prev.map(x => (x.id === c.id ? { ...x, archived: true } : x)));
-        if (openClassId === c.id) setOpenClassId(null);
+      onConfirm: async () => {
+        await updateClass(c.key, { archived: true });
+        if (openClassId === c.key) setOpenClassId(null);
         notify(`${c.name} · ${c.code} was archived.`, "archive");
+        setConfirmDlg(null);
       },
     });
   }
 
-  function restoreClass(c: ClassItem) {
-    setClasses(prev => prev.map(x => (x.id === c.id ? { ...x, archived: false } : x)));
-    notify(`Successfully restored ${c.name} · ${c.code}.`);
+  function restoreClass(c: ClassRecord) {
+    updateClass(c.key, { archived: false }).then(() =>
+      notify(`Restored ${c.name} · ${c.code}.`)
+    );
   }
 
-  function deleteClassForever(c: ClassItem) {
+  function deleteClassForever(c: ClassRecord) {
     setConfirmDlg({
-      tone: "delete",
-      title: "Delete this class permanently?",
-      subject: `${c.name} · ${c.code}`,
+      tone: "delete", title: "Delete this class permanently?", subject: `${c.name} · ${c.code}`,
       message: "Its attendance records will be deleted and students will be unenrolled. This cannot be undone.",
       confirmLabel: "Delete",
-      onConfirm: () => {
-        setClasses(prev => prev.filter(x => x.id !== c.id));
-        setStudents(prev => prev.map(x => ({ ...x, classIds: x.classIds.filter(id => id !== c.id) })));
-        setLogs(prev => prev.filter(l => l.classId !== c.id));
+      onConfirm: async () => {
+        // Unenroll all students
+        const enrolled = students.filter(s => s.classKeys?.includes(c.key));
+        await Promise.all(enrolled.map(s =>
+          updateStudent(s.key, { classKeys: s.classKeys.filter(k => k !== c.key) })
+        ));
+        await deleteClass(c.key);
         notify(`${c.name} · ${c.code} was permanently deleted.`, "delete");
+        setConfirmDlg(null);
       },
     });
   }
 
-  /* ---- archive actions: students ---- */
-  function archiveStudent(st: Student) {
+  /* ── student CRUD ── */
+  function archiveStudent(st: StudentRecord) {
     setConfirmDlg({
-      tone: "archive",
-      title: "Archive this student?",
-      subject: st.name,
-      message: "They will be hidden from all classes. You can restore them later from the Archive tab.",
+      tone: "archive", title: "Archive this student?", subject: st.name,
+      message: "They will be hidden from all classes. You can restore them later.",
       confirmLabel: "Archive",
-      onConfirm: () => {
-        setStudents(prev => prev.map(x => (x.id === st.id ? { ...x, archived: true } : x)));
+      onConfirm: async () => {
+        await updateStudent(st.key, { archived: true });
         notify(`${st.name} was archived.`, "archive");
+        setConfirmDlg(null);
       },
     });
   }
 
-  function restoreStudent(st: Student) {
-    setStudents(prev => prev.map(x => (x.id === st.id ? { ...x, archived: false } : x)));
-    notify(`Successfully restored ${st.name}.`);
+  function restoreStudent(st: StudentRecord) {
+    updateStudent(st.key, { archived: false }).then(() => notify(`Restored ${st.name}.`));
   }
 
-  function deleteStudentForever(st: Student) {
+  function deleteStudentForever(st: StudentRecord) {
     setConfirmDlg({
-      tone: "delete",
-      title: "Delete this student permanently?",
-      subject: st.name,
+      tone: "delete", title: "Delete this student permanently?", subject: st.name,
       message: "Their attendance records will be deleted. This cannot be undone.",
       confirmLabel: "Delete",
-      onConfirm: () => {
-        setStudents(prev => prev.filter(x => x.id !== st.id));
-        setLogs(prev => prev.filter(l => l.studentId !== st.id));
+      onConfirm: async () => {
+        await deleteStudent(st.key);
         notify(`${st.name} was permanently deleted.`, "delete");
+        setConfirmDlg(null);
       },
     });
   }
 
-  function openAddStudents() {
-    setPickIds([]);
-    setPickSearch("");
-    setAddStudentsOpen(true);
-  }
-
-  function addPickedToClass(cls: ClassItem) {
-    setStudents(prev =>
-      prev.map(x => (pickIds.includes(x.id) && !x.classIds.includes(cls.id) ? { ...x, classIds: [...x.classIds, cls.id] } : x))
-    );
-    notify(`Successfully added ${pickIds.length} student${pickIds.length === 1 ? "" : "s"} to ${cls.name} · ${cls.code}.`);
-    setAddStudentsOpen(false);
-  }
-
-  function openStudentModal(mode: StudentModalMode, st?: Student) {
+  function openStudentModal(mode: "add" | "edit" | "view", st?: StudentRecord) {
     setSError("");
     if (st) {
-      setSFirst(st.firstName);
-      setSLast(st.lastName);
-      setSEmail(st.id);
-      setSProgram(st.program);
-      setSYear(st.year);
-      setSSection(st.section);
-      setSRfid(st.rfid);
-      setSClassIds(st.classIds);
+      setSFirst(st.firstName); setSLast(st.lastName); setSEmail(st.studentId);
+      setSProgram(st.program); setSYear(st.year); setSSection(st.section);
+      setSRfid(st.rfidUid ?? ""); setSClassIds(st.classKeys ?? []);
     } else {
-      setSFirst("");
-      setSLast("");
-      setSEmail("");
-      setSProgram("");
-      setSYear(1);
-      setSSection("");
-      setSRfid("");
-      setSClassIds(activeClasses[0] ? [activeClasses[0].id] : []);
+      setSFirst(""); setSLast(""); setSEmail(""); setSProgram("");
+      setSYear(1); setSSection(""); setSRfid("");
+      setSClassIds(activeClasses[0] ? [activeClasses[0].key] : []);
     }
-    setStudentModal({ mode, id: st?.id });
+    setStudentModal({ mode, id: st?.key });
   }
 
   function toggleClass(id: string) {
-    setSClassIds(prev => (prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]));
+    setSClassIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
   }
 
-  function handleSaveStudent(e: FormEvent) {
+  async function handleSaveStudent(e: FormEvent) {
     e.preventDefault();
     if (!studentModal) return;
     setSError("");
-
-    const first = sFirst.trim();
-    const last = sLast.trim();
+    const first    = sFirst.trim();
+    const last     = sLast.trim();
     const studentNo = sEmail.trim();
-    const email = `${studentNo}${EMAIL_DOMAIN}`;
-    const rfid = sRfid.trim().toUpperCase();
-    const adding = studentModal.mode === "add";
-    const program = sProgram.trim();
-    const section = sSection.trim();
+    const rfid     = sRfid.trim().toUpperCase().replace(/[^0-9A-F]/g, "");
+    const adding   = studentModal.mode === "add";
+    const program  = sProgram.trim();
+    const section  = sSection.trim();
 
-    if (!first || !last) return setSError("Enter the student's first and last name.");
+    if (!first || !last)              return setSError("Enter the student's first and last name.");
     if (!NAME_RE.test(first) || !NAME_RE.test(last)) return setSError("Names can only contain letters.");
-    if (adding && !STUDENT_NO_RE.test(studentNo)) {
-      return setSError("Student number must be 9 digits and start with 20, e.g. 202310417.");
-    }
-    const studentId = adding ? studentNo : studentModal.id!;
-    if (adding && students.some(x => x.id === studentId)) {
+    if (adding && !STUDENT_NO_RE.test(studentNo))
+      return setSError("Student number must be 9 digits and start with 20.");
+    const studentId = adding ? studentNo : (students.find(s => s.key === studentModal.id)?.studentId ?? studentNo);
+    if (adding && students.some(x => x.studentId === studentId))
       return setSError("A student with this ID is already registered.");
-    }
-    if (!program) return setSError("Enter the program, e.g. BSIT.");
-    if (!PROGRAM_RE.test(program)) return setSError(`Program: letters only, up to ${PROGRAM_MAX} characters.`);
-    if (!section) return setSError("Enter the section, e.g. BSIT 4B.");
+    if (!program)                     return setSError("Enter the program, e.g. BSIT.");
+    if (!PROGRAM_RE.test(program))    return setSError(`Program: letters only, up to ${PROGRAM_MAX} characters.`);
+    if (!section)                     return setSError("Enter the section, e.g. BSIT 4B.");
     if (!WORDS_RE.test(section) || section.length > SECTION_MAX)
       return setSError(`Section: letters and numbers only, up to ${SECTION_MAX} characters.`);
-    if (sClassIds.length === 0) return setSError("Select at least one class.");
+    if (sClassIds.length === 0)       return setSError("Select at least one class.");
+    if (rfid && !/^[0-9A-F]{4,16}$/.test(rfid))
+      return setSError("RFID UID should be 4–16 hex characters.");
     if (rfid) {
-      if (!/^[0-9A-F]{4,16}$/.test(rfid)) {
-        return setSError("RFID UID should be 4 to 16 characters using 0-9 and A-F.");
-      }
-      const dup = students.find(x => x.rfid === rfid && x.id !== studentId);
+      const dup = students.find(x => x.rfidUid === rfid && x.key !== studentModal.id);
       if (dup) return setSError(`That card is already assigned to ${dup.name}.`);
     }
 
-    const existing = students.find(x => x.id === studentId);
-    // Keep enrollments in archived classes, since the form only shows active classes
-    const keptArchivedIds = (existing?.classIds ?? []).filter(id => classes.find(c => c.id === id)?.archived);
+    setStuSaving(true);
+    try {
+      const data: Omit<StudentRecord, "key"> = {
+        teacherUid: teacherUid!,
+        firstName: first, lastName: last,
+        name: `${first} ${last}`,
+        studentId,
+        email: `${studentId}${EMAIL_DOMAIN}`,
+        program: program.toUpperCase(),
+        year: sYear,
+        section: section.toUpperCase(),
+        rfidUid: rfid,
+        classKeys: sClassIds,
+      };
+      if (adding) {
+        await addStudent(data);
+        notify(`Added ${data.name}.`);
+      } else {
+        const existing = students.find(s => s.key === studentModal.id)!;
+        // Preserve archived class enrollments
+        const keptArchived = (existing.classKeys ?? []).filter(id => classes.find(c => c.key === id)?.archived);
+        await updateStudent(studentModal.id!, { ...data, classKeys: [...sClassIds, ...keptArchived], archived: existing.archived });
+        notify(`Updated ${data.name}.`);
+      }
+      setStudentModal(null);
+    } catch {
+      setSError("Failed to save. Please try again.");
+    } finally {
+      setStuSaving(false);
+    }
+  }
 
-    const next: Student = {
-      id: studentId,
-      firstName: first,
-      lastName: last,
-      name: `${first} ${last}`,
-      email: adding ? email : existing?.email ?? email,
-      program: program.toUpperCase(),
-      year: sYear,
-      section: section.toUpperCase(),
-      rfid,
-      classIds: [...sClassIds, ...keptArchivedIds],
-      archived: existing?.archived,
-    };
-    setStudents(prev => (adding ? [...prev, next] : prev.map(x => (x.id === studentId ? next : x))));
-    notify(adding ? `Successfully added ${next.name}.` : `Successfully updated ${next.name}.`);
-    setStudentModal(null);
+  /* add-students-to-class */
+  function openAddStudents() { setPickIds([]); setPickSearch(""); setAddStudentsOpen(true); }
+
+  async function addPickedToClass(cls: ClassRecord) {
+    await Promise.all(
+      pickIds.map(key => {
+        const st = students.find(s => s.key === key)!;
+        return updateStudent(key, { classKeys: [...(st.classKeys ?? []), cls.key] });
+      })
+    );
+    notify(`Added ${pickIds.length} student${pickIds.length === 1 ? "" : "s"} to ${cls.name} · ${cls.code}.`);
+    setAddStudentsOpen(false);
+  }
+
+  /* ── active session ── */
+  async function handleStartSession(cls: ClassRecord) {
+    setSessionSaving(true);
+    try {
+      await startSession(cls, teacherUid!);
+      notify(`Started recording attendance for ${cls.name} · ${cls.code}.`);
+    } catch {
+      notify("Failed to start session.", "error");
+    } finally {
+      setSessionSaving(false);
+    }
+  }
+
+  async function handleStopSession() {
+    setSessionSaving(true);
+    try {
+      await stopSession();
+      notify("Attendance session stopped.");
+    } catch {
+      notify("Failed to stop session.", "error");
+    } finally {
+      setSessionSaving(false);
+    }
+  }
+
+  /* ── export CSV ── */
+  function exportCsv() {
+    const header = ["Student", "Student ID", "Class", "Section", "Date", "Status", "Time In", "Time Out", "Duration"];
+    const lines = visibleRows.map(r => [
+      r.student.name, r.student.studentId, r.cls.code, r.cls.name,
+      fmtDay(r.rec.date), STATUS_META[r.rec.status].label,
+      r.rec.timeInMs  ? fmtTime(msToMin(r.rec.timeInMs))  : "—",
+      r.rec.timeOutMs ? fmtTime(msToMin(r.rec.timeOutMs)) : "—",
+      r.rec.timeInMs && r.rec.timeOutMs ? fmtDuration(msToMin(r.rec.timeInMs), msToMin(r.rec.timeOutMs)) : "—",
+    ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(","));
+    const blob = new Blob([[header.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url; a.download = `attendance-${today}.csv`; a.click();
+    URL.revokeObjectURL(url);
   }
 
   function exportStudentsCsv() {
     const header = ["Last name", "First name", "Student ID", "Program", "Year", "Section", "RFID UID", "Card status"];
-    const lines = filteredStudents.map(st =>
-      [st.lastName, st.firstName, st.id, st.program, st.year, st.section, st.rfid || "—", st.rfid ? "Registered" : "No card"]
-        .map(v => `"${String(v).replace(/"/g, '""')}"`)
-        .join(",")
-    );
+    const lines = filteredStudents.map(st => [
+      st.lastName, st.firstName, st.studentId, st.program, st.year, st.section,
+      st.rfidUid || "—", st.rfidUid ? "Registered" : "No card",
+    ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(","));
     const blob = new Blob([[header.join(","), ...lines].join("\n")], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `students-${today}.csv`;
-    a.click();
+    const a = document.createElement("a"); a.href = url; a.download = `students-${today}.csv`; a.click();
     URL.revokeObjectURL(url);
   }
 
-  if (!teacher || !dates) return <LoadingSkeleton variant="teacher" />;
+  /* ── edit attendance record ── */
+  function openEditRec(rec: AttendanceRecord, student: StudentRecord, cls: ClassRecord) {
+    setEditRec({ rec, student, cls });
+    setEditDate(rec.date);
+    // Convert epoch ms back to HH:MM for the time inputs
+    const tIn  = rec.timeInMs  ? msToMin(rec.timeInMs)  : undefined;
+    const tOut = rec.timeOutMs ? msToMin(rec.timeOutMs) : undefined;
+    const toHHMM = (min: number | undefined) => {
+      if (min === undefined) return "";
+      const h = Math.floor(min / 60).toString().padStart(2, "0");
+      const m = (min % 60).toString().padStart(2, "0");
+      return `${h}:${m}`;
+    };
+    setEditTimeIn(toHHMM(tIn));
+    setEditTimeOut(toHHMM(tOut));
+    setEditStatus(rec.status);
+    setEditError("");
+  }
 
-  const navItems: { id: Tab; label: string; icon: typeof LayoutDashboard }[] = [
-    { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
-    { id: "classes", label: "Classes", icon: Users },
-    { id: "attendance", label: "Attendance", icon: ClipboardCheck },
-    { id: "students", label: "Students", icon: UserPlus },
-    { id: "archive", label: "Archive", icon: Archive },
-  ];
+  async function handleSaveEditRec() {
+    if (!editRec) return;
+    setEditError("");
+    if (!editDate) { setEditError("Date is required."); return; }
+    if (!editTimeIn) { setEditError("Time In is required."); return; }
+    if (editTimeOut && editTimeOut <= editTimeIn) {
+      setEditError("Time Out must be after Time In."); return;
+    }
 
-  const pageTitle: Record<Tab, { title: string; sub: string }> = {
-    dashboard: { title: "Dashboard", sub: "Today's RFID attendance at a glance." },
-    classes: { title: "Classes", sub: "Create and manage your classes and students." },
-    attendance: { title: "Attendance", sub: "RFID tap-in and tap-out records for your classes." },
-    students: { title: "Students", sub: "Manage registered students and their RFID cards." },
-    archive: { title: "Archive", sub: "Restore archived classes and students, or delete them for good." },
-  };
+    // Build epoch ms from date + HH:MM (local PH time = UTC+8)
+    const toEpochMs = (date: string, hhmm: string): number => {
+      const [h, m] = hhmm.split(":").map(Number);
+      const d = new Date(`${date}T${hhmm}:00+08:00`);
+      return d.getTime();
+    };
 
+    const updated: AttendanceRecord = {
+      ...editRec.rec,
+      date:      editDate,
+      status:    editStatus,
+      timeInMs:  toEpochMs(editDate, editTimeIn),
+      timeOutMs: editTimeOut ? toEpochMs(editDate, editTimeOut) : undefined,
+      writtenBy: "manual",
+    };
+
+    setEditSaving(true);
+    try {
+      await writeAttendanceRecord(updated);
+      notify("Attendance record updated.");
+      setEditRec(null);
+    } catch {
+      setEditError("Failed to save. Please try again.");
+    } finally {
+      setEditSaving(false);
+    }
+  }
+
+  /* ── loading guard ── */
+  const loading = !teacher || classesLoading || studentsLoading;  if (loading) return <LoadingSkeleton variant="teacher" />;
+
+  /* ── derived lists ── */
   const filteredClasses = activeClasses.filter(c => {
     const q = classSearch.toLowerCase();
     return c.name.toLowerCase().includes(q) || c.code.toLowerCase().includes(q) || `year ${c.year}`.includes(q);
@@ -628,74 +720,67 @@ export default function TeacherPage() {
 
   const filteredStudents = activeStudents.filter(s => {
     const q = search.toLowerCase();
-    if (q && !s.name.toLowerCase().includes(q) && !s.id.includes(q)) return false;
-    if (fsYear !== "all" && String(s.year) !== fsYear) return false;
-    if (fsSection !== "all" && s.section !== fsSection) return false;
-    if (fsProgram !== "all" && s.program !== fsProgram) return false;
+    if (q && !s.name.toLowerCase().includes(q) && !s.studentId.includes(q)) return false;
+    if (fsYear    !== "all" && String(s.year)    !== fsYear)    return false;
+    if (fsSection !== "all" && s.section         !== fsSection) return false;
+    if (fsProgram !== "all" && s.program         !== fsProgram) return false;
     return true;
   });
 
-  const studentYears = Array.from(new Set(activeStudents.map(s => s.year))).sort();
+  const studentYears    = Array.from(new Set(activeStudents.map(s => s.year))).sort();
   const studentSections = Array.from(new Set(activeStudents.map(s => s.section))).sort();
   const studentPrograms = Array.from(new Set(activeStudents.map(s => s.program))).sort();
 
   const aq = archiveSearch.trim().toLowerCase();
-  const shownArchivedStudents = archivedStudents.filter(
-    s => !aq || s.name.toLowerCase().includes(aq) || s.id.includes(aq)
-  );
-  const shownArchivedClasses = archivedClasses.filter(
-    c => !aq || c.name.toLowerCase().includes(aq) || c.code.toLowerCase().includes(aq)
-  );
+  const shownArchivedStudents = archivedStudents.filter(s => !aq || s.name.toLowerCase().includes(aq) || s.studentId.includes(aq));
+  const shownArchivedClasses  = archivedClasses.filter(c => !aq || c.name.toLowerCase().includes(aq) || c.code.toLowerCase().includes(aq));
 
-  // Paged slices (exports above still use the full filtered lists)
-  const attPaged = paginate(visibleRows, attPage);
-  const stuPaged = paginate(filteredStudents, stuPage);
+  const attPaged    = paginate(visibleRows, attPage);
+  const stuPaged    = paginate(filteredStudents, stuPage);
   const arcStuPaged = paginate(shownArchivedStudents, arcStuPage);
   const arcClsPaged = paginate(shownArchivedClasses, arcClsPage);
 
-  const timeText = now
-    ? now.toLocaleTimeString("en-PH", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true })
-    : "--:--:--";
-  const dateText = now
-    ? now.toLocaleDateString("en-PH", { weekday: "long", month: "long", day: "numeric", year: "numeric" })
-    : "";
-
-  const initial = (teacher.name?.trim()[0] ?? "T").toUpperCase();
+  const timeText = now ? now.toLocaleTimeString("en-PH", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true }) : "--:--:--";
+  const dateText = now ? now.toLocaleDateString("en-PH", { weekday: "long", month: "long", day: "numeric", year: "numeric" }) : "";
+  const initial  = (teacher.name?.trim()[0] ?? "T").toUpperCase();
 
   const chips: { id: StatusFilter; label: string; color?: string }[] = [
     { id: "all", label: "All records" },
-    { id: "present", label: "Present", color: STATUS_META.present.color },
-    { id: "late", label: "Late", color: STATUS_META.late.color },
-    { id: "absent", label: "Absent", color: STATUS_META.absent.color },
+    { id: "present",    label: "Present",    color: STATUS_META.present.color },
+    { id: "late",       label: "Late",       color: STATUS_META.late.color },
+    { id: "absent",     label: "Absent",     color: STATUS_META.absent.color },
     { id: "incomplete", label: "Incomplete", color: STATUS_META.incomplete.color },
   ];
 
+  const navItems: { id: Tab; label: string; icon: typeof LayoutDashboard }[] = [
+    { id: "dashboard",  label: "Dashboard",  icon: LayoutDashboard },
+    { id: "classes",    label: "Classes",    icon: Users },
+    { id: "attendance", label: "Attendance", icon: ClipboardCheck },
+    { id: "students",   label: "Students",   icon: UserPlus },
+    { id: "archive",    label: "Archive",    icon: Archive },
+  ];
+
+  const pageTitle: Record<Tab, { title: string; sub: string }> = {
+    dashboard:  { title: "Dashboard",  sub: "Today's RFID attendance at a glance." },
+    classes:    { title: "Classes",    sub: "Create and manage your classes and students." },
+    attendance: { title: "Attendance", sub: "RFID tap-in and tap-out records for your classes." },
+    students:   { title: "Students",   sub: "Manage registered students and their RFID cards." },
+    archive:    { title: "Archive",    sub: "Restore archived classes and students, or delete them for good." },
+  };
+
   const selectWrap = "relative";
-  const selectCls = "w-full appearance-none px-4 py-3 pr-10 rounded-xl text-sm font-medium outline-none";
+  const selectCls  = "w-full appearance-none px-4 py-3 pr-10 rounded-xl text-sm font-medium outline-none";
 
-  const recentTaps = logs
-    .filter(l => l.date === today && l.timeIn !== undefined)
-    .map(l => ({
-      log: l,
-      student: activeStudents.find(x => x.id === l.studentId),
-      cls: activeClasses.find(x => x.id === l.classId),
-    }))
-    .filter((r): r is { log: Log; student: Student; cls: ClassItem } => !!r.student && !!r.cls)
-    .sort((a, b) => (b.log.timeIn ?? 0) - (a.log.timeIn ?? 0))
-    .slice(0, 6);
+  const openClassItem = openClassId ? activeClasses.find(c => c.key === openClassId) ?? null : null;
 
-  const openClassItem = openClassId ? activeClasses.find(c => c.id === openClassId) ?? null : null;
-
+  // ── renderAttendance (shared between Attendance tab and Classes > Attendance view) ──
   const renderAttendance = (scoped: boolean) => (
     <>
-      {/* Status chips with counts */}
       <div className="flex flex-wrap gap-3">
         {chips.map(ch => {
           const active = fStatus === ch.id;
           return (
-            <button
-              key={ch.id}
-              onClick={() => setFStatus(ch.id)}
+            <button key={ch.id} onClick={() => setFStatus(ch.id)}
               className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold"
               style={{
                 background: active ? C.ink : C.surface,
@@ -715,23 +800,13 @@ export default function TeacherPage() {
       </div>
 
       <section className="rounded-2xl overflow-hidden" style={{ background: C.surface, border: `1px solid ${C.border}` }}>
-        {/* Filters */}
         <div className="p-5 space-y-3">
-          <div
-            className="flex items-center gap-3 rounded-xl px-4 py-3"
-            style={{ background: C.surface, border: `1px solid ${C.border}` }}
-          >
+          <div className="flex items-center gap-3 rounded-xl px-4 py-3" style={{ background: C.surface, border: `1px solid ${C.border}` }}>
             <Search className="w-4 h-4 shrink-0" style={{ color: C.muted }} />
-            <input
-              value={fSearch}
-              onChange={e => setFSearch(e.target.value)}
-              maxLength={SEARCH_MAX}
+            <input value={fSearch} onChange={e => setFSearch(e.target.value)} maxLength={SEARCH_MAX}
               placeholder="Search student name or ID"
-              className="flex-1 bg-transparent outline-none text-sm"
-              style={{ color: C.text }}
-            />
+              className="flex-1 bg-transparent outline-none text-sm" style={{ color: C.text }} />
           </div>
-
           <div className={`grid sm:grid-cols-2 gap-3 ${scoped ? "" : "lg:grid-cols-4"}`}>
             <div className={selectWrap}>
               <select value={fDate} onChange={e => setFDate(e.target.value)} className={selectCls} style={inputStyle}>
@@ -744,48 +819,29 @@ export default function TeacherPage() {
             </div>
             {!scoped && (
               <>
-                <div className={selectWrap}>
-                  <select value={fClass} onChange={e => setFClass(e.target.value)} className={selectCls} style={inputStyle}>
-                    <option value="all">All classes</option>
-                    {classCodes.map(c => (
-                      <option key={c} value={c}>{c}</option>
-                    ))}
-                  </select>
-                  <ChevronDown className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: C.muted }} />
-                </div>
-                <div className={selectWrap}>
-                  <select value={fSection} onChange={e => setFSection(e.target.value)} className={selectCls} style={inputStyle}>
-                    <option value="all">All sections</option>
-                    {sections.map(s => (
-                      <option key={s} value={s}>{s}</option>
-                    ))}
-                  </select>
-                  <ChevronDown className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: C.muted }} />
-                </div>
-                <div className={selectWrap}>
-                  <select value={fYear} onChange={e => setFYear(e.target.value)} className={selectCls} style={inputStyle}>
-                    <option value="all">All years</option>
-                    {years.map(y => (
-                      <option key={y} value={String(y)}>Year {y}</option>
-                    ))}
-                  </select>
-                  <ChevronDown className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: C.muted }} />
-                </div>
+                {[
+                  { val: fClass,   set: setFClass,   opts: classCodes, label: "All classes",  fmt: (v: string) => v },
+                  { val: fSection, set: setFSection, opts: sections,   label: "All sections", fmt: (v: string) => v },
+                  { val: fYear,    set: setFYear,    opts: years.map(String), label: "All years", fmt: (v: string) => `Year ${v}` },
+                ].map(({ val, set, opts, label, fmt }) => (
+                  <div key={label} className={selectWrap}>
+                    <select value={val} onChange={e => set(e.target.value)} className={selectCls} style={inputStyle}>
+                      <option value="all">{label}</option>
+                      {opts.map(o => <option key={o} value={o}>{fmt(o)}</option>)}
+                    </select>
+                    <ChevronDown className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: C.muted }} />
+                  </div>
+                ))}
               </>
             )}
           </div>
-
-          <button
-            onClick={exportCsv}
-            disabled={visibleRows.length === 0}
+          <button onClick={exportCsv} disabled={visibleRows.length === 0}
             className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold disabled:opacity-50"
-            style={{ background: C.surface, color: C.text, border: `1px solid ${C.border}`, boxShadow: "0 1px 2px rgba(16,24,40,.05)" }}
-          >
+            style={{ background: C.surface, color: C.text, border: `1px solid ${C.border}`, boxShadow: "0 1px 2px rgba(16,24,40,.05)" }}>
             <Download className="w-4 h-4" /> Export
           </button>
         </div>
 
-        {/* Table */}
         <div className="overflow-x-auto">
           <table className={`w-full text-sm ${scoped ? "min-w-[640px]" : "min-w-[820px]"}`}>
             <thead>
@@ -798,28 +854,34 @@ export default function TeacherPage() {
                   </>
                 )}
                 <th className="py-3 pr-4 font-medium">Date</th>
+                <th className="py-3 pr-4 font-medium">Status</th>
                 <th className="py-3 pr-4 font-medium">Time In</th>
                 <th className="py-3 pr-4 font-medium">Time Out</th>
                 <th className="py-3 pr-5 font-medium">Duration</th>
+                <th className="py-3 pr-5 font-medium">Edit</th>
               </tr>
             </thead>
             <tbody>
-              {attPaged.items.map(r => {
-                const { log, student, cls } = r;
+              {historyLoading ? (
+                <tr><td colSpan={scoped ? 7 : 9} className="py-10 text-center text-sm" style={{ color: C.muted }}>Loading records…</td></tr>
+              ) : attPaged.items.length === 0 ? (
+                <tr><td colSpan={scoped ? 7 : 9} className="py-10 text-center text-sm" style={{ color: C.muted }}>No attendance records match these filters.</td></tr>
+              ) : attPaged.items.map(r => {
+                const { rec, student, cls } = r;
+                const tIn  = rec.timeInMs  ? msToMin(rec.timeInMs)  : undefined;
+                const tOut = rec.timeOutMs ? msToMin(rec.timeOutMs) : undefined;
                 const dash = { color: C.muted };
                 return (
-                  <tr key={`${log.classId}${log.date}${log.studentId}`} style={{ borderTop: `1px solid ${C.border}` }}>
+                  <tr key={`${rec.classKey}${rec.date}${rec.studentKey}`} style={{ borderTop: `1px solid ${C.border}` }}>
                     <td className="py-3 pl-5 pr-4">
                       <div className="flex items-center gap-3">
-                        <div
-                          className="w-9 h-9 rounded-full flex items-center justify-center text-xs font-semibold shrink-0"
-                          style={{ background: C.greenSoft, color: C.greenDark, border: `1px solid ${C.greenEdge}` }}
-                        >
+                        <div className="w-9 h-9 rounded-full flex items-center justify-center text-xs font-semibold shrink-0"
+                          style={{ background: C.greenSoft, color: C.greenDark, border: `1px solid ${C.greenEdge}` }}>
                           {initials(student.name)}
                         </div>
                         <div>
                           <p className="font-semibold" style={{ color: C.text }}>{student.name}</p>
-                          <p className="text-xs" style={{ color: C.muted }}>{student.id}</p>
+                          <p className="text-xs" style={{ color: C.muted }}>{student.studentId}</p>
                         </div>
                       </div>
                     </td>
@@ -829,24 +891,28 @@ export default function TeacherPage() {
                         <td className="py-3 pr-4 font-medium" style={{ color: C.text }}>{cls.name}</td>
                       </>
                     )}
-                    <td className="py-3 pr-4 font-medium" style={{ color: C.text }}>{fmtDay(log.date)}</td>
-                    <td className="py-3 pr-4 font-medium" style={log.timeIn === undefined ? dash : { color: C.text }}>
-                      {fmtTime(log.timeIn)}
+                    <td className="py-3 pr-4 font-medium" style={{ color: C.text }}>{fmtDay(rec.date)}</td>
+                    <td className="py-3 pr-4">
+                      <span className="px-2.5 py-1 rounded-full text-xs font-semibold"
+                        style={{ background: `${STATUS_META[rec.status].color}20`, color: STATUS_META[rec.status].color }}>
+                        {STATUS_META[rec.status].label}
+                      </span>
                     </td>
-                    <td className="py-3 pr-4 font-medium" style={log.timeOut === undefined ? dash : { color: C.text }}>
-                      {fmtTime(log.timeOut)}
+                    <td className="py-3 pr-4 font-medium" style={tIn === undefined ? dash : { color: C.text }}>{fmtTime(tIn)}</td>
+                    <td className="py-3 pr-4 font-medium" style={tOut === undefined ? dash : { color: C.text }}>{fmtTime(tOut)}</td>
+                    <td className="py-3 pr-4" style={dash}>{fmtDuration(tIn, tOut)}</td>
+                    <td className="py-3 pr-5">
+                      <button
+                        onClick={() => openEditRec(rec, student, cls)}
+                        title="Edit record"
+                        className="w-8 h-8 rounded-lg flex items-center justify-center hover:bg-green-50"
+                        style={{ border: `1px solid ${C.border}`, color: C.muted }}>
+                        <Pencil className="w-3.5 h-3.5" />
+                      </button>
                     </td>
-                    <td className="py-3 pr-5" style={dash}>{fmtDuration(log.timeIn, log.timeOut)}</td>
                   </tr>
                 );
               })}
-              {visibleRows.length === 0 && (
-                <tr>
-                  <td colSpan={scoped ? 5 : 7} className="py-10 text-center text-sm" style={{ color: C.muted }}>
-                    No attendance records match these filters.
-                  </td>
-                </tr>
-              )}
             </tbody>
           </table>
         </div>
@@ -855,38 +921,32 @@ export default function TeacherPage() {
     </>
   );
 
+  // ── JSX ──────────────────────────────────────────────────────────────────────
+
   return (
     <div className="flex min-h-screen" style={{ background: C.bg, fontFamily: "'Poppins', system-ui, sans-serif" }}>
       <style>{`@import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700&display=swap'); @keyframes toastIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }`}</style>
 
       <TeacherSidebar
-        collapsed={collapsed}
-        setCollapsed={setCollapsed}
-        navItems={navItems}
-        tab={tab}
-        setTab={setTab}
+        collapsed={collapsed} setCollapsed={setCollapsed}
+        navItems={navItems} tab={tab} setTab={setTab}
         setOpenClassId={setOpenClassId}
-        initial={initial}
-        teacher={teacher}
+        initial={initial} teacher={teacher}
         setConfirmSignOut={setConfirmSignOut}
       />
 
-      {/* ============================== MAIN ============================== */}
       <main className="flex-1 min-w-0 px-4 sm:px-10 py-8">
         <div className="max-w-6xl mx-auto space-y-6">
-          {/* Page header with live clock */}
+
+          {/* Page header */}
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
               <h1 className="text-2xl font-bold" style={{ color: C.text }}>{pageTitle[tab].title}</h1>
               <p className="text-sm mt-1" style={{ color: C.muted }}>{pageTitle[tab].sub}</p>
             </div>
-
             <div className="flex items-center gap-3">
               {tab === "dashboard" && (
-                <div
-                  className="flex items-center gap-3 rounded-xl px-4 py-2.5"
-                  style={{ background: C.surface, border: `1px solid ${C.border}` }}
-                >
+                <div className="flex items-center gap-3 rounded-xl px-4 py-2.5" style={{ background: C.surface, border: `1px solid ${C.border}` }}>
                   <Clock className="w-5 h-5" style={{ color: C.green }} />
                   <div className="leading-tight">
                     <p className="text-base font-semibold tabular-nums" style={{ color: C.text }}>{timeText}</p>
@@ -895,27 +955,49 @@ export default function TeacherPage() {
                 </div>
               )}
               {tab === "classes" && !openClassId && (
-                <button
-                  onClick={openAddClass}
+                <button onClick={openAddClass}
                   className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold text-white"
-                  style={{ background: C.green }}
-                >
+                  style={{ background: C.green }}>
                   <Plus className="w-4 h-4" /> Add Class
                 </button>
               )}
             </div>
           </div>
 
-          {/* ============================ DASHBOARD ============================ */}
+          {/* ─── Active session banner ─────────────────────────────────────── */}
+          {activeSession && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl px-5 py-4"
+              style={{ background: C.greenSoft, border: `2px solid ${C.green}` }}>
+              <div className="flex items-center gap-3">
+                <span className="w-2.5 h-2.5 rounded-full animate-pulse" style={{ background: C.green }} />
+                <div>
+                  <p className="text-sm font-bold" style={{ color: C.greenDark }}>
+                    Recording: {activeSession.className} · {activeSession.classCode}
+                  </p>
+                  <p className="text-xs" style={{ color: C.green }}>
+                    RFID taps are being recorded as attendance. Started {new Date(activeSession.startedAt).toLocaleTimeString()}.
+                  </p>
+                </div>
+              </div>
+              <button onClick={handleStopSession} disabled={sessionSaving}
+                className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white disabled:opacity-60"
+                style={{ background: C.red }}>
+                {sessionSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Square className="w-4 h-4" />}
+                Stop session
+              </button>
+            </div>
+          )}
+
+          {/* ─────────────────────────── DASHBOARD ────────────────────────── */}
           {tab === "dashboard" && (
             <>
               <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
                 {[
-                  { label: "Classes", value: activeClasses.length, icon: BookOpen, color: C.green, soft: C.greenSoft },
-                  { label: "Students", value: activeStudents.length, icon: Users, color: C.blue, soft: C.blueSoft },
-                  { label: "Present today", value: overview.present, icon: CheckCircle2, color: C.green, soft: C.greenSoft },
-                  { label: "Not yet tapped", value: overview.notTapped, icon: Clock, color: "#d97706", soft: "#fef3c7" },
-                  { label: "Total absences", value: overview.totalAbsences, icon: AlertTriangle, color: C.red, soft: "#fee2e2" },
+                  { label: "Classes",        value: activeClasses.length,     icon: BookOpen,      color: C.green, soft: C.greenSoft },
+                  { label: "Students",       value: activeStudents.length,    icon: Users,         color: C.blue,  soft: C.blueSoft },
+                  { label: "Present today",  value: overview.present,         icon: CheckCircle2,  color: C.green, soft: C.greenSoft },
+                  { label: "Not yet tapped", value: overview.notTapped,       icon: Clock,         color: "#d97706", soft: "#fef3c7" },
+                  { label: "Total absences", value: overview.totalAbsences,   icon: AlertTriangle, color: C.red,   soft: "#fee2e2" },
                 ].map(st => {
                   const Icon = st.icon;
                   return (
@@ -932,21 +1014,26 @@ export default function TeacherPage() {
                 })}
               </div>
 
+              {/* Class cards with Start Session button */}
               <div>
                 <h2 className="text-base font-semibold mb-3" style={{ color: C.text }}>Today&apos;s attendance by class</h2>
                 <div className="grid md:grid-cols-2 xl:grid-cols-3 gap-5">
                   {activeClasses.map(c => {
-                    const roster = classStudents(c.id);
-                    const todays = logs.filter(l => l.classId === c.id && l.date === today && roster.some(x => x.id === l.studentId));
-                    const present = todays.filter(l => l.status === "present").length;
-                    const late = todays.filter(l => l.status === "late").length;
+                    const roster   = classStudents(c.key);
+                    const todays   = recordsFor(c.key, today);
+                    const present  = todays.filter(r => r.status === "present").length;
+                    const late     = todays.filter(r => r.status === "late").length;
                     const notTapped = Math.max(roster.length - present - late, 0);
-                    const total = roster.length || 1;
-                    const avg = roster.length
-                      ? Math.round(roster.reduce((sum, x) => sum + pairStats(c.id, x.id).rate, 0) / roster.length)
+                    const total    = roster.length || 1;
+                    const avg      = roster.length
+                      ? Math.round(roster.reduce((sum, x) => sum + pairStats(c.key, x.key).rate, 0) / roster.length)
                       : 0;
+                    const isActive = activeSession?.classKey === c.key && activeSession.active;
                     return (
-                      <div key={c.id} className="rounded-2xl p-5 flex flex-col" style={cardStyle}>
+                      <div key={c.key} className="rounded-2xl p-5 flex flex-col" style={{
+                        ...cardStyle,
+                        ...(isActive ? { border: `2px solid ${C.green}` } : {}),
+                      }}>
                         <div className="flex items-start justify-between gap-3">
                           <div className="flex items-center gap-3 min-w-0">
                             <div className="w-11 h-11 rounded-xl flex items-center justify-center shrink-0" style={{ background: C.greenSoft }}>
@@ -957,12 +1044,17 @@ export default function TeacherPage() {
                               <p className="text-xs font-semibold" style={{ color: C.muted }}>{c.code}</p>
                             </div>
                           </div>
-                          <span
-                            className="px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide shrink-0"
-                            style={{ background: C.greenSoft, color: C.greenDark, border: `1px solid ${C.greenEdge}` }}
-                          >
-                            Year {c.year}
-                          </span>
+                          {isActive ? (
+                            <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide shrink-0"
+                              style={{ background: C.greenSoft, color: C.greenDark, border: `1px solid ${C.green}` }}>
+                              <span className="w-1.5 h-1.5 rounded-full animate-pulse" style={{ background: C.green }} /> Live
+                            </span>
+                          ) : (
+                            <span className="px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide shrink-0"
+                              style={{ background: C.greenSoft, color: C.greenDark, border: `1px solid ${C.greenEdge}` }}>
+                              Year {c.year}
+                            </span>
+                          )}
                         </div>
 
                         <p className="flex items-center gap-1.5 text-xs mt-3" style={{ color: C.muted }}>
@@ -985,38 +1077,48 @@ export default function TeacherPage() {
                           </span>
                         </div>
 
-                        <div
-                          className="flex items-center justify-between mt-auto pt-4"
-                          style={{ borderTop: `1px solid ${C.border}` }}
-                        >
+                        <div className="flex items-center justify-between mt-auto pt-4" style={{ borderTop: `1px solid ${C.border}` }}>
                           <div>
-                            <p className="text-[11px]" style={{ color: C.muted }}>Average attendance</p>
+                            <p className="text-[11px]" style={{ color: C.muted }}>Avg attendance</p>
                             <p className="text-sm font-bold" style={{ color: avg < 75 && roster.length ? C.red : C.text }}>
                               {roster.length ? `${avg}%` : "—"}
                               <span className="font-medium text-xs" style={{ color: C.muted }}> · {roster.length} students</span>
                             </p>
                           </div>
-                          <button
-                            onClick={() => openClass(c)}
-                            className="flex items-center gap-1 text-xs font-semibold"
-                            style={{ color: C.green }}
-                          >
-                            View class <ChevronRight className="w-3.5 h-3.5" />
-                          </button>
+                          {isActive ? (
+                            <button onClick={handleStopSession} disabled={sessionSaving}
+                              className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg"
+                              style={{ background: "#fee2e2", color: C.red }}>
+                              {sessionSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Square className="w-3.5 h-3.5" />}
+                              Stop
+                            </button>
+                          ) : (
+                            <button onClick={() => handleStartSession(c)} disabled={sessionSaving || (!!activeSession && activeSession.active)}
+                              title={activeSession?.active ? "Stop the current session first" : "Start recording attendance"}
+                              className="flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-lg disabled:opacity-40"
+                              style={{ background: C.greenSoft, color: C.greenDark }}>
+                              {sessionSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
+                              Start
+                            </button>
+                          )}
                         </div>
                       </div>
                     );
                   })}
+                  {activeClasses.length === 0 && (
+                    <p className="col-span-full text-sm py-8 text-center" style={{ color: C.muted }}>
+                      No classes yet. Go to the Classes tab and add one.
+                    </p>
+                  )}
                 </div>
               </div>
 
+              {/* Needs attention + recent taps */}
               <div className="grid lg:grid-cols-3 gap-5">
                 <section className="lg:col-span-2 rounded-2xl overflow-hidden" style={cardStyle}>
                   <div className="p-5 pb-4">
                     <h2 className="font-semibold" style={{ color: C.text }}>Students to monitor</h2>
-                    <p className="text-xs mt-0.5" style={{ color: C.muted }}>
-                      3 or more absences, or an attendance rate below 75%.
-                    </p>
+                    <p className="text-xs mt-0.5" style={{ color: C.muted }}>3 or more absences, or attendance rate below 75%.</p>
                   </div>
                   {needsAttention.length === 0 ? (
                     <p className="text-sm px-5 pb-6" style={{ color: C.muted }}>No students need attention right now.</p>
@@ -1028,32 +1130,27 @@ export default function TeacherPage() {
                             <th className="py-2.5 pl-5 pr-4 font-medium">Student</th>
                             <th className="py-2.5 pr-4 font-medium">Class</th>
                             <th className="py-2.5 pr-4 font-medium">Absences</th>
-                            <th className="py-2.5 pr-5 font-medium">Attendance rate</th>
+                            <th className="py-2.5 pr-5 font-medium">Rate</th>
                           </tr>
                         </thead>
                         <tbody>
                           {needsAttention.map(n => (
-                            <tr key={n.student.id + n.cls.id} style={{ borderTop: `1px solid ${C.border}` }}>
+                            <tr key={n.student.key + n.cls.key} style={{ borderTop: `1px solid ${C.border}` }}>
                               <td className="py-3 pl-5 pr-4">
                                 <div className="flex items-center gap-3">
-                                  <div
-                                    className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-semibold shrink-0"
-                                    style={{ background: C.greenSoft, color: C.greenDark, border: `1px solid ${C.greenEdge}` }}
-                                  >
+                                  <div className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-semibold shrink-0"
+                                    style={{ background: C.greenSoft, color: C.greenDark, border: `1px solid ${C.greenEdge}` }}>
                                     {initials(n.student.name)}
                                   </div>
                                   <div>
                                     <p className="font-semibold" style={{ color: C.text }}>{n.student.name}</p>
-                                    <p className="text-xs" style={{ color: C.muted }}>{n.student.id}</p>
+                                    <p className="text-xs" style={{ color: C.muted }}>{n.student.studentId}</p>
                                   </div>
                                 </div>
                               </td>
                               <td className="py-3 pr-4 font-medium" style={{ color: C.text }}>{n.cls.name}</td>
                               <td className="py-3 pr-4">
-                                <span
-                                  className="px-2.5 py-1 rounded-full text-xs font-semibold"
-                                  style={{ background: "#fee2e2", color: C.red }}
-                                >
+                                <span className="px-2.5 py-1 rounded-full text-xs font-semibold" style={{ background: "#fee2e2", color: C.red }}>
                                   {n.absent}
                                 </span>
                               </td>
@@ -1081,11 +1178,9 @@ export default function TeacherPage() {
                   ) : (
                     <ul className="space-y-3">
                       {recentTaps.map(r => (
-                        <li key={`${r.log.classId}${r.log.studentId}`} className="flex items-center gap-3">
-                          <div
-                            className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-semibold shrink-0"
-                            style={{ background: C.greenSoft, color: C.greenDark, border: `1px solid ${C.greenEdge}` }}
-                          >
+                        <li key={`${r.rec.classKey}${r.rec.studentKey}`} className="flex items-center gap-3">
+                          <div className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-semibold shrink-0"
+                            style={{ background: C.greenSoft, color: C.greenDark, border: `1px solid ${C.greenEdge}` }}>
                             {initials(r.student.name)}
                           </div>
                           <div className="min-w-0 flex-1">
@@ -1093,9 +1188,11 @@ export default function TeacherPage() {
                             <p className="text-xs truncate" style={{ color: C.muted }}>{r.cls.name} · {r.cls.code}</p>
                           </div>
                           <div className="text-right shrink-0">
-                            <p className="text-xs font-semibold" style={{ color: C.text }}>{fmtTime(r.log.timeIn)}</p>
-                            <p className="text-[11px] font-medium" style={{ color: STATUS_META[r.log.status].color }}>
-                              {r.log.status === "late" ? "Late" : "On time"}
+                            <p className="text-xs font-semibold" style={{ color: C.text }}>
+                              {r.rec.timeInMs ? fmtTime(msToMin(r.rec.timeInMs)) : "—"}
+                            </p>
+                            <p className="text-[11px] font-medium" style={{ color: STATUS_META[r.rec.status].color }}>
+                              {r.rec.status === "late" ? "Late" : "On time"}
                             </p>
                           </div>
                         </li>
@@ -1107,71 +1204,42 @@ export default function TeacherPage() {
             </>
           )}
 
-          {/* ============================== CLASSES ============================== */}
+          {/* ──────────────────────────── CLASSES ─────────────────────────── */}
           {tab === "classes" && !openClassId && (
             <>
-              <div
-                className="flex items-center gap-3 rounded-xl px-4 py-3.5"
-                style={{ background: C.surface, border: `1px solid ${C.border}` }}
-              >
+              <div className="flex items-center gap-3 rounded-xl px-4 py-3.5" style={{ background: C.surface, border: `1px solid ${C.border}` }}>
                 <Search className="w-4 h-4 shrink-0" style={{ color: C.muted }} />
-                <input
-                  value={classSearch}
-                  onChange={e => setClassSearch(e.target.value)}
-                  maxLength={SEARCH_MAX}
-                  placeholder="Search classes by name, course, or year..."
-                  className="flex-1 bg-transparent outline-none text-sm font-medium"
-                  style={{ color: C.text }}
-                />
+                <input value={classSearch} onChange={e => setClassSearch(e.target.value)}
+                  maxLength={SEARCH_MAX} placeholder="Search classes by name, course, or year..."
+                  className="flex-1 bg-transparent outline-none text-sm font-medium" style={{ color: C.text }} />
               </div>
-
               <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-6">
                 {filteredClasses.map(c => {
-                  const count = classStudents(c.id).length;
+                  const count = classStudents(c.key).length;
                   return (
-                    <button
-                      key={c.id}
-                      onClick={() => openClass(c)}
-                      className="text-left rounded-2xl p-6"
-                      style={cardStyle}
-                    >
+                    <button key={c.key} onClick={() => { setOpenClassId(c.key); setClassView("attendance"); }}
+                      className="text-left rounded-2xl p-6" style={cardStyle}>
                       <div className="flex items-start justify-between">
-                        <div
-                          className="w-12 h-12 rounded-xl flex items-center justify-center"
-                          style={{ background: C.greenSoft }}
-                        >
+                        <div className="w-12 h-12 rounded-xl flex items-center justify-center" style={{ background: C.greenSoft }}>
                           <GraduationCap className="w-6 h-6" style={{ color: C.green }} />
                         </div>
-                        <span
-                          className="px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide"
-                          style={{ background: C.greenSoft, color: C.greenDark, border: `1px solid ${C.greenEdge}` }}
-                        >
+                        <span className="px-2.5 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide"
+                          style={{ background: C.greenSoft, color: C.greenDark, border: `1px solid ${C.greenEdge}` }}>
                           Year {c.year}
                         </span>
                       </div>
-
                       <h3 className="mt-5 text-lg font-bold" style={{ color: C.text }}>{c.name}</h3>
                       <p className="text-sm font-semibold mt-1" style={{ color: C.muted }}>{c.code}</p>
                       <p className="flex items-center gap-2 text-xs font-medium mt-3" style={{ color: C.muted }}>
-                        <CalendarDays className="w-3.5 h-3.5" /> {fmtDay(c.created)}
+                        <CalendarDays className="w-3.5 h-3.5" /> {fmtDay(c.createdAt?.substring(0, 10) ?? "")}
                       </p>
-
-                      <div
-                        className="flex items-center justify-between mt-5 pt-4"
-                        style={{ borderTop: `1px solid ${C.border}` }}
-                      >
+                      <div className="flex items-center justify-between mt-5 pt-4" style={{ borderTop: `1px solid ${C.border}` }}>
                         <div className="flex items-center gap-2">
-                          <div
-                            className="w-8 h-8 rounded-full flex items-center justify-center"
-                            style={{ background: C.blueSoft }}
-                          >
+                          <div className="w-8 h-8 rounded-full flex items-center justify-center" style={{ background: C.blueSoft }}>
                             <Users className="w-4 h-4" style={{ color: C.blue }} />
                           </div>
                           <span className="text-sm font-bold" style={{ color: C.text }}>
-                            {count}{" "}
-                            <span className="text-[10px] font-semibold uppercase" style={{ color: C.muted }}>
-                              {count === 1 ? "Student" : "Students"}
-                            </span>
+                            {count} <span className="text-[10px] font-semibold uppercase" style={{ color: C.muted }}>{count === 1 ? "Student" : "Students"}</span>
                           </span>
                         </div>
                         <ClipboardCheck className="w-4 h-4" style={{ color: C.muted }} />
@@ -1180,27 +1248,22 @@ export default function TeacherPage() {
                   );
                 })}
               </div>
-
               {filteredClasses.length === 0 && (
-                <p className="text-sm text-center py-10" style={{ color: C.muted }}>
-                  No classes match your search. Try a different name or use Add Class.
-                </p>
+                <p className="text-sm text-center py-10" style={{ color: C.muted }}>No classes yet. Click Add Class to get started.</p>
               )}
             </>
           )}
 
           {tab === "classes" && openClassItem && (() => {
-            const roster = classStudents(openClassItem.id);
+            const roster = classStudents(openClassItem.key);
             const q = rosterSearch.trim().toLowerCase();
-            const shownRoster = roster.filter(x => !q || x.name.toLowerCase().includes(q) || x.id.includes(q));
+            const shownRoster = roster.filter(x => !q || x.name.toLowerCase().includes(q) || x.studentId.includes(q));
             const rosterPaged = paginate(shownRoster, rosterPage);
             return (
               <>
-                <button
-                  onClick={() => setOpenClassId(null)}
+                <button onClick={() => setOpenClassId(null)}
                   className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-semibold"
-                  style={{ background: C.surface, color: C.text, border: `1px solid ${C.border}`, boxShadow: "0 1px 2px rgba(16,24,40,.05)" }}
-                >
+                  style={{ background: C.surface, color: C.text, border: `1px solid ${C.border}`, boxShadow: "0 1px 2px rgba(16,24,40,.05)" }}>
                   <ChevronLeft className="w-4 h-4" /> Back to classes
                 </button>
 
@@ -1219,18 +1282,14 @@ export default function TeacherPage() {
                     </div>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      onClick={() => openEditClass(openClassItem)}
+                    <button onClick={() => openEditClass(openClassItem)}
                       className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold"
-                      style={{ background: C.surface, color: C.text, border: `1px solid ${C.border}`, boxShadow: "0 1px 2px rgba(16,24,40,.05)" }}
-                    >
+                      style={{ background: C.surface, color: C.text, border: `1px solid ${C.border}`, boxShadow: "0 1px 2px rgba(16,24,40,.05)" }}>
                       <Pencil className="w-4 h-4" /> Edit class
                     </button>
-                    <button
-                      onClick={() => archiveClass(openClassItem)}
+                    <button onClick={() => archiveClass(openClassItem)}
                       className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold"
-                      style={{ background: C.amberSoft, color: C.amber, border: `1px solid ${C.amberSoft}` }}
-                    >
+                      style={{ background: C.amberSoft, color: C.amber, border: `1px solid ${C.amberSoft}` }}>
                       <Archive className="w-4 h-4" /> Archive class
                     </button>
                   </div>
@@ -1238,130 +1297,95 @@ export default function TeacherPage() {
 
                 <div className="flex flex-wrap gap-3">
                   {([
-                    { id: "attendance", label: "Attendance", icon: ClipboardCheck },
-                    { id: "students", label: `Students ${roster.length}`, icon: Users },
-                  ] as const).map(t => {
+                    { id: "attendance" as const, label: "Attendance", icon: ClipboardCheck },
+                    { id: "students"   as const, label: `Students ${roster.length}`, icon: Users },
+                  ]).map(t => {
                     const Icon = t.icon;
                     const active = classView === t.id;
                     return (
-                      <button
-                        key={t.id}
-                        onClick={() => setClassView(t.id)}
+                      <button key={t.id} onClick={() => setClassView(t.id)}
                         className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold"
-                        style={{
-                          background: active ? C.ink : C.surface,
-                          color: active ? "#fff" : C.text,
-                          border: `1px solid ${active ? C.ink : C.border}`,
-                          boxShadow: "0 1px 2px rgba(16,24,40,.05)",
-                        }}
-                      >
+                        style={{ background: active ? C.ink : C.surface, color: active ? "#fff" : C.text, border: `1px solid ${active ? C.ink : C.border}`, boxShadow: "0 1px 2px rgba(16,24,40,.05)" }}>
                         <Icon className="w-4 h-4" /> {t.label}
                       </button>
                     );
                   })}
                 </div>
 
-                {classView === "attendance" ? (
-                  renderAttendance(true)
-                ) : (
+                {classView === "attendance" ? renderAttendance(true) : (
                   <>
                     <div className="flex flex-wrap items-center justify-between gap-3">
-                      <button
-                        onClick={openAddStudents}
+                      <button onClick={openAddStudents}
                         className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white"
-                        style={{ background: C.green }}
-                      >
+                        style={{ background: C.green }}>
                         <UserPlus className="w-4 h-4" /> Add students
                       </button>
-                      <div className="relative">
-                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4" style={{ color: C.muted }} />
-                        <input
-                          value={rosterSearch}
-                          onChange={e => setRosterSearch(e.target.value)}
-                          maxLength={SEARCH_MAX}
-                          placeholder="Search name or ID"
-                          className="pl-9 pr-3 py-2.5 rounded-xl text-sm outline-none"
-                          style={inputStyle}
-                        />
-                      </div>
                     </div>
-
+                    <div className="flex items-center gap-3 rounded-xl px-4 py-3.5" style={{ background: C.surface, border: `1px solid ${C.border}` }}>
+                      <Search className="w-4 h-4 shrink-0" style={{ color: C.muted }} />
+                      <input value={rosterSearch} onChange={e => setRosterSearch(e.target.value)}
+                        maxLength={SEARCH_MAX} placeholder="Search roster..."
+                        className="flex-1 bg-transparent outline-none text-sm" style={{ color: C.text }} />
+                    </div>
                     <section className="rounded-2xl overflow-hidden" style={{ background: C.surface, border: `1px solid ${C.border}` }}>
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-sm min-w-[760px]">
-                          <thead>
-                            <tr className="text-left text-xs" style={{ color: C.muted, background: C.bg }}>
-                              <th className="py-3 pl-5 pr-4 font-medium">Student</th>
-                              <th className="py-3 pr-4 font-medium">Student ID</th>
-                              <th className="py-3 pr-4 font-medium">Section</th>
-                              <th className="py-3 pr-4 font-medium">RFID UID</th>
-                              <th className="py-3 pr-4 font-medium">Card status</th>
-                              <th className="py-3 pr-5 font-medium text-right">Actions</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {rosterPaged.items.map(st => (
-                              <tr key={st.id} style={{ borderTop: `1px solid ${C.border}` }}>
+                      <table className="w-full text-sm min-w-[480px]">
+                        <thead>
+                          <tr className="text-left text-xs" style={{ color: C.muted, background: C.bg }}>
+                            <th className="py-3 pl-5 pr-4 font-medium">Student</th>
+                            <th className="py-3 pr-4 font-medium">RFID</th>
+                            <th className="py-3 pr-4 font-medium">Absences</th>
+                            <th className="py-3 pr-5 font-medium">Rate</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {rosterPaged.items.length === 0 ? (
+                            <tr><td colSpan={4} className="py-10 text-center text-sm" style={{ color: C.muted }}>No students in this class yet.</td></tr>
+                          ) : rosterPaged.items.map(s => {
+                            const { absent, rate } = pairStats(openClassItem.key, s.key);
+                            return (
+                              <tr key={s.key} style={{ borderTop: `1px solid ${C.border}` }}>
                                 <td className="py-3 pl-5 pr-4">
                                   <div className="flex items-center gap-3">
-                                    <div
-                                      className="w-9 h-9 rounded-full flex items-center justify-center text-xs font-semibold shrink-0"
-                                      style={{ background: C.greenSoft, color: C.greenDark, border: `1px solid ${C.greenEdge}` }}
-                                    >
-                                      {initials(st.name)}
+                                    <div className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-semibold shrink-0"
+                                      style={{ background: C.greenSoft, color: C.greenDark, border: `1px solid ${C.greenEdge}` }}>
+                                      {initials(s.name)}
                                     </div>
-                                    <span className="font-semibold" style={{ color: C.text }}>{st.lastName}, {st.firstName}</span>
+                                    <div>
+                                      <p className="font-semibold" style={{ color: C.text }}>{s.name}</p>
+                                      <p className="text-xs" style={{ color: C.muted }}>{s.studentId}</p>
+                                    </div>
                                   </div>
                                 </td>
-                                <td className="py-3 pr-4" style={{ color: C.muted }}>{st.id}</td>
-                                <td className="py-3 pr-4 font-medium" style={{ color: C.text }}>{st.section}</td>
-                                <td className="py-3 pr-4 font-mono text-xs font-semibold" style={{ color: st.rfid ? C.text : C.muted }}>
-                                  {st.rfid || "—"}
+                                <td className="py-3 pr-4">
+                                  {s.rfidUid ? (
+                                    <span className="flex items-center gap-1.5 text-xs font-mono font-semibold" style={{ color: C.greenDark }}>
+                                      <Wifi className="w-3.5 h-3.5" /> {s.rfidUid}
+                                    </span>
+                                  ) : (
+                                    <span className="flex items-center gap-1.5 text-xs" style={{ color: C.muted }}>
+                                      <WifiOff className="w-3.5 h-3.5" /> No card
+                                    </span>
+                                  )}
                                 </td>
                                 <td className="py-3 pr-4">
-                                  <span
-                                    className="px-2.5 py-1 rounded-full text-xs font-semibold"
-                                    style={st.rfid ? { background: C.greenSoft, color: C.greenDark } : { background: "#f3f4f6", color: C.muted }}
-                                  >
-                                    {st.rfid ? "Registered" : "No card"}
+                                  <span className="px-2.5 py-1 rounded-full text-xs font-semibold"
+                                    style={{ background: absent >= 3 ? "#fee2e2" : C.bg, color: absent >= 3 ? C.red : C.muted }}>
+                                    {absent}
                                   </span>
                                 </td>
                                 <td className="py-3 pr-5">
-                                  <div className="flex items-center justify-end gap-2">
-                                    <button
-                                      onClick={() => openStudentModal("edit", st)}
-                                      title="Edit student"
-                                      aria-label={`Edit ${st.name}`}
-                                      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold"
-                                      style={{ color: C.text, background: "#f3f4f6" }}
-                                    >
-                                      <Pencil className="w-3.5 h-3.5" /> Edit
-                                    </button>
-                                    <button
-                                      onClick={() => archiveStudent(st)}
-                                      title="Archive student"
-                                      aria-label={`Archive ${st.name}`}
-                                      className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold"
-                                      style={{ color: C.amber, background: C.amberSoft }}
-                                    >
-                                      <Archive className="w-3.5 h-3.5" /> Archive
-                                    </button>
+                                  <div className="flex items-center gap-2">
+                                    <div className="h-2 w-20 rounded-full" style={{ background: "#e5e7eb" }}>
+                                      <div className="h-2 rounded-full" style={{ width: `${rate}%`, background: rate < 75 ? C.red : C.green }} />
+                                    </div>
+                                    <span className="text-xs font-semibold" style={{ color: C.text }}>{rate}%</span>
                                   </div>
                                 </td>
                               </tr>
-                            ))}
-                            {shownRoster.length === 0 && (
-                              <tr>
-                                <td colSpan={6} className="py-10 text-center text-sm" style={{ color: C.muted }}>
-                                  {roster.length === 0
-                                    ? "No students in this class yet. Use Add students to enroll some."
-                                    : "No students match your search."}
-                                </td>
-                              </tr>
-                            )}
-                          </tbody>
-                        </table>
-                      </div>
+                            );
+                          })}
+                        </tbody>
+                      </table>
                       <Pagination page={rosterPaged.page} totalPages={rosterPaged.totalPages} total={rosterPaged.total} onChange={setRosterPage} />
                     </section>
                   </>
@@ -1370,534 +1394,451 @@ export default function TeacherPage() {
             );
           })()}
 
-          {/* ============================ ATTENDANCE ============================ */}
+          {/* ─────────────────────────── ATTENDANCE ───────────────────────── */}
           {tab === "attendance" && renderAttendance(false)}
 
-          {/* ============================== STUDENTS ============================== */}
+          {/* ──────────────────────────── STUDENTS ────────────────────────── */}
           {tab === "students" && (
             <>
               <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="flex flex-wrap items-center gap-3">
-                  <button
-                    onClick={exportStudentsCsv}
-                    disabled={filteredStudents.length === 0}
-                    className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold disabled:opacity-50"
-                    style={{ background: C.surface, color: C.text, border: `1px solid ${C.border}`, boxShadow: "0 1px 2px rgba(16,24,40,.05)" }}
-                  >
+                <div className="flex flex-wrap items-center gap-3 flex-1">
+                  <div className="relative flex-1 min-w-[200px]">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4" style={{ color: C.muted }} />
+                    <input value={search} onChange={e => setSearch(e.target.value)} maxLength={SEARCH_MAX}
+                      placeholder="Search name or student ID..."
+                      className="w-full pl-9 pr-3 py-2.5 rounded-xl text-sm outline-none" style={inputStyle} />
+                  </div>
+                  {[
+                    { val: fsYear,    set: setFsYear,    opts: studentYears.map(String), label: "All years",    fmt: (v: string) => `Year ${v}` },
+                    { val: fsSection, set: setFsSection, opts: studentSections,          label: "All sections", fmt: (v: string) => v },
+                    { val: fsProgram, set: setFsProgram, opts: studentPrograms,          label: "All programs", fmt: (v: string) => v },
+                  ].map(({ val, set, opts, label, fmt }) => (
+                    <div key={label} className={selectWrap}>
+                      <select value={val} onChange={e => set(e.target.value)} className="appearance-none px-4 py-2.5 pr-9 rounded-xl text-sm font-medium outline-none" style={inputStyle}>
+                        <option value="all">{label}</option>
+                        {opts.map(o => <option key={o} value={o}>{fmt(o)}</option>)}
+                      </select>
+                      <ChevronDown className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: C.muted }} />
+                    </div>
+                  ))}
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={exportStudentsCsv} disabled={filteredStudents.length === 0}
+                    className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold disabled:opacity-40"
+                    style={{ background: C.surface, color: C.text, border: `1px solid ${C.border}` }}>
                     <Download className="w-4 h-4" /> Export
                   </button>
-                  <button
-                    onClick={() => openStudentModal("add")}
+                  <button onClick={() => openStudentModal("add")}
                     className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold text-white"
-                    style={{ background: C.green }}
-                  >
-                    <Plus className="w-4 h-4" /> Add student
+                    style={{ background: C.green }}>
+                    <Plus className="w-4 h-4" /> Add Student
                   </button>
-                </div>
-                <div className="relative">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4" style={{ color: C.muted }} />
-                  <input
-                    value={search}
-                    onChange={e => setSearch(e.target.value)}
-                    maxLength={SEARCH_MAX}
-                    placeholder="Search name or ID"
-                    className="pl-9 pr-3 py-2.5 rounded-xl text-sm outline-none"
-                    style={inputStyle}
-                  />
-                </div>
-              </div>
-
-              <div className="grid sm:grid-cols-3 gap-3">
-                <div className={selectWrap}>
-                  <select value={fsYear} onChange={e => setFsYear(e.target.value)} className={selectCls} style={inputStyle}>
-                    <option value="all">All years</option>
-                    {studentYears.map(y => (
-                      <option key={y} value={String(y)}>Year {y}</option>
-                    ))}
-                  </select>
-                  <ChevronDown className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: C.muted }} />
-                </div>
-                <div className={selectWrap}>
-                  <select value={fsSection} onChange={e => setFsSection(e.target.value)} className={selectCls} style={inputStyle}>
-                    <option value="all">All sections</option>
-                    {studentSections.map(s => (
-                      <option key={s} value={s}>{s}</option>
-                    ))}
-                  </select>
-                  <ChevronDown className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: C.muted }} />
-                </div>
-                <div className={selectWrap}>
-                  <select value={fsProgram} onChange={e => setFsProgram(e.target.value)} className={selectCls} style={inputStyle}>
-                    <option value="all">All programs</option>
-                    {studentPrograms.map(p => (
-                      <option key={p} value={p}>{p}</option>
-                    ))}
-                  </select>
-                  <ChevronDown className="w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: C.muted }} />
                 </div>
               </div>
 
               <section className="rounded-2xl overflow-hidden" style={{ background: C.surface, border: `1px solid ${C.border}` }}>
-                <div className="overflow-x-auto">
-                  <table className="w-full text-sm min-w-[900px]">
-                    <thead>
-                      <tr className="text-left text-xs" style={{ color: C.muted, background: C.bg }}>
-                        <th className="py-3 pl-5 pr-4 font-medium">Student</th>
-                        <th className="py-3 pr-4 font-medium">Student ID</th>
-                        <th className="py-3 pr-4 font-medium">Program</th>
-                        <th className="py-3 pr-4 font-medium">Year</th>
-                        <th className="py-3 pr-4 font-medium">Section</th>
-                        <th className="py-3 pr-4 font-medium">RFID UID</th>
-                        <th className="py-3 pr-4 font-medium">Card status</th>
-                        <th className="py-3 pr-5 font-medium text-right">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {stuPaged.items.map(st => (
-                        <tr key={st.id} style={{ borderTop: `1px solid ${C.border}` }}>
-                          <td className="py-3 pl-5 pr-4">
-                            <div className="flex items-center gap-3">
-                              <div
-                                className="w-9 h-9 rounded-full flex items-center justify-center text-xs font-semibold shrink-0"
-                                style={{ background: C.greenSoft, color: C.greenDark, border: `1px solid ${C.greenEdge}` }}
-                              >
-                                {initials(st.name)}
-                              </div>
-                              <span className="font-semibold" style={{ color: C.text }}>{st.lastName}, {st.firstName}</span>
-                            </div>
-                          </td>
-                          <td className="py-3 pr-4" style={{ color: C.muted }}>{st.id}</td>
-                          <td className="py-3 pr-4 font-medium" style={{ color: C.text }}>{st.program}</td>
-                          <td className="py-3 pr-4 font-medium" style={{ color: C.text }}>{st.year}</td>
-                          <td className="py-3 pr-4 font-medium" style={{ color: C.text }}>{st.section}</td>
-                          <td className="py-3 pr-4 font-mono text-xs font-semibold" style={{ color: st.rfid ? C.text : C.muted }}>
-                            {st.rfid || "—"}
-                          </td>
-                          <td className="py-3 pr-4">
-                            <span
-                              className="px-2.5 py-1 rounded-full text-xs font-semibold"
-                              style={
-                                st.rfid
-                                  ? { background: C.greenSoft, color: C.greenDark }
-                                  : { background: "#f3f4f6", color: C.muted }
-                              }
-                            >
-                              {st.rfid ? "Registered" : "No card"}
-                            </span>
-                          </td>
-                          <td className="py-3 pr-5">
-                            <div className="flex items-center justify-end gap-1">
-                              <button
-                                onClick={() => openStudentModal("view", st)}
-                                title="View student"
-                                aria-label={`View ${st.name}`}
-                                className="p-2 rounded-md"
-                                style={{ color: C.muted }}
-                              >
-                                <Eye className="w-4 h-4" />
-                              </button>
-                              <button
-                                onClick={() => openStudentModal("edit", st)}
-                                title="Edit student"
-                                aria-label={`Edit ${st.name}`}
-                                className="p-2 rounded-md"
-                                style={{ color: C.muted }}
-                              >
-                                <Pencil className="w-4 h-4" />
-                              </button>
-                              <button
-                                onClick={() => archiveStudent(st)}
-                                title="Archive student"
-                                aria-label={`Archive ${st.name}`}
-                                className="p-2 rounded-md"
-                                style={{ color: C.muted }}
-                              >
-                                <Archive className="w-4 h-4" />
-                              </button>
-                            </div>
-                          </td>
-                        </tr>
+                <table className="w-full text-sm min-w-[640px]">
+                  <thead>
+                    <tr className="text-left text-xs" style={{ color: C.muted, background: C.bg }}>
+                      {["Student", "Program / Section", "RFID Card", "Classes", "Actions"].map(h => (
+                        <th key={h} className="py-3 pl-5 pr-4 font-medium">{h}</th>
                       ))}
-                      {filteredStudents.length === 0 && (
-                        <tr>
-                          <td colSpan={8} className="py-10 text-center text-sm" style={{ color: C.muted }}>
-                            No students match your search.
-                          </td>
-                        </tr>
-                      )}
-                    </tbody>
-                  </table>
-                </div>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {stuPaged.items.length === 0 ? (
+                      <tr><td colSpan={5} className="py-10 text-center text-sm" style={{ color: C.muted }}>
+                        {search || fsYear !== "all" || fsSection !== "all" || fsProgram !== "all"
+                          ? "No students match your filters." : "No students yet. Click Add Student to get started."}
+                      </td></tr>
+                    ) : stuPaged.items.map(s => (
+                      <tr key={s.key} style={{ borderTop: `1px solid ${C.border}` }}>
+                        <td className="py-3 pl-5 pr-4">
+                          <div className="flex items-center gap-3">
+                            <div className="w-9 h-9 rounded-full flex items-center justify-center text-xs font-semibold shrink-0"
+                              style={{ background: C.greenSoft, color: C.greenDark, border: `1px solid ${C.greenEdge}` }}>
+                              {initials(s.name)}
+                            </div>
+                            <div>
+                              <p className="font-semibold" style={{ color: C.text }}>{s.name}</p>
+                              <p className="text-xs" style={{ color: C.muted }}>{s.studentId}</p>
+                            </div>
+                          </div>
+                        </td>
+                        <td className="py-3 pr-4" style={{ color: C.muted }}>
+                          <p className="text-xs font-semibold" style={{ color: C.text }}>{s.program} · Year {s.year}</p>
+                          <p className="text-xs">{s.section}</p>
+                        </td>
+                        <td className="py-3 pr-4">
+                          {s.rfidUid ? (
+                            <span className="flex items-center gap-1.5 text-xs font-mono font-semibold" style={{ color: C.greenDark }}>
+                              <Wifi className="w-3.5 h-3.5" /> {s.rfidUid}
+                            </span>
+                          ) : (
+                            <span className="flex items-center gap-1.5 text-xs" style={{ color: C.muted }}>
+                              <WifiOff className="w-3.5 h-3.5" /> No card
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-3 pr-4 text-xs" style={{ color: C.muted }}>
+                          {(s.classKeys ?? []).map(k => {
+                            const cls = classes.find(c => c.key === k);
+                            return cls ? <span key={k} className="mr-1">{cls.code}</span> : null;
+                          })}
+                        </td>
+                        <td className="py-3 pr-4">
+                          <div className="flex gap-1.5">
+                            <button onClick={() => openStudentModal("view", s)} title="View"
+                              className="w-8 h-8 rounded-lg flex items-center justify-center hover:bg-green-50"
+                              style={{ border: `1px solid ${C.border}`, color: C.muted }}>
+                              <Eye className="w-3.5 h-3.5" />
+                            </button>
+                            <button onClick={() => openStudentModal("edit", s)} title="Edit"
+                              className="w-8 h-8 rounded-lg flex items-center justify-center hover:bg-green-50"
+                              style={{ border: `1px solid ${C.border}`, color: C.muted }}>
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                            <button onClick={() => archiveStudent(s)} title="Archive"
+                              className="w-8 h-8 rounded-lg flex items-center justify-center hover:bg-amber-50"
+                              style={{ border: `1px solid ${C.border}`, color: C.muted }}>
+                              <Archive className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
                 <Pagination page={stuPaged.page} totalPages={stuPaged.totalPages} total={stuPaged.total} onChange={setStuPage} />
               </section>
             </>
           )}
 
-          {/* ============================== ARCHIVE ============================== */}
+          {/* ──────────────────────────── ARCHIVE ─────────────────────────── */}
           {tab === "archive" && (
             <>
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="flex flex-wrap gap-3">
-                  {([
-                    { id: "students", label: `Students ${archivedStudents.length}`, icon: Users },
-                    { id: "classes", label: `Classes ${archivedClasses.length}`, icon: GraduationCap },
-                  ] as const).map(t => {
-                    const Icon = t.icon;
-                    const active = archiveView === t.id;
-                    return (
-                      <button
-                        key={t.id}
-                        onClick={() => setArchiveView(t.id)}
-                        className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold"
-                        style={{
-                          background: active ? C.ink : C.surface,
-                          color: active ? "#fff" : C.text,
-                          border: `1px solid ${active ? C.ink : C.border}`,
-                          boxShadow: "0 1px 2px rgba(16,24,40,.05)",
-                        }}
-                      >
-                        <Icon className="w-4 h-4" /> {t.label}
-                      </button>
-                    );
-                  })}
+              <div className="flex flex-wrap gap-3 items-center justify-between">
+                <div className="flex gap-2">
+                  {(["students", "classes"] as const).map(v => (
+                    <button key={v} onClick={() => setArchiveView(v)}
+                      className="px-4 py-2 rounded-xl text-sm font-semibold capitalize"
+                      style={{ background: archiveView === v ? C.ink : C.surface, color: archiveView === v ? "#fff" : C.text, border: `1px solid ${archiveView === v ? C.ink : C.border}` }}>
+                      {v}
+                    </button>
+                  ))}
                 </div>
                 <div className="relative">
                   <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4" style={{ color: C.muted }} />
-                  <input
-                    value={archiveSearch}
-                    onChange={e => setArchiveSearch(e.target.value)}
-                    maxLength={SEARCH_MAX}
-                    placeholder={archiveView === "students" ? "Search name or ID" : "Search class or code"}
-                    className="pl-9 pr-3 py-2.5 rounded-xl text-sm outline-none"
-                    style={inputStyle}
-                  />
+                  <input value={archiveSearch} onChange={e => setArchiveSearch(e.target.value)}
+                    maxLength={SEARCH_MAX} placeholder={`Search archived ${archiveView}...`}
+                    className="pl-9 pr-3 py-2.5 rounded-xl text-sm outline-none w-64" style={inputStyle} />
                 </div>
               </div>
 
-              {archiveView === "students" ? (
+              {archiveView === "students" && (
                 <section className="rounded-2xl overflow-hidden" style={{ background: C.surface, border: `1px solid ${C.border}` }}>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm min-w-[720px]">
-                      <thead>
-                        <tr className="text-left text-xs" style={{ color: C.muted, background: C.bg }}>
-                          <th className="py-3 pl-5 pr-4 font-medium">Student</th>
-                          <th className="py-3 pr-4 font-medium">Student ID</th>
-                          <th className="py-3 pr-4 font-medium">Program</th>
-                          <th className="py-3 pr-4 font-medium">Section</th>
-                          <th className="py-3 pr-5 font-medium text-right">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {arcStuPaged.items.map(st => (
-                          <tr key={st.id} style={{ borderTop: `1px solid ${C.border}` }}>
-                            <td className="py-3 pl-5 pr-4">
-                              <div className="flex items-center gap-3">
-                                <div
-                                  className="w-9 h-9 rounded-full flex items-center justify-center text-xs font-semibold shrink-0"
-                                  style={{ background: "#f3f4f6", color: C.muted }}
-                                >
-                                  {initials(st.name)}
-                                </div>
-                                <span className="font-semibold" style={{ color: C.text }}>{st.lastName}, {st.firstName}</span>
-                              </div>
-                            </td>
-                            <td className="py-3 pr-4" style={{ color: C.muted }}>{st.id}</td>
-                            <td className="py-3 pr-4 font-medium" style={{ color: C.text }}>{st.program}</td>
-                            <td className="py-3 pr-4 font-medium" style={{ color: C.text }}>{st.section}</td>
-                            <td className="py-3 pr-5">
-                              <div className="flex items-center justify-end gap-2">
-                                <button
-                                  onClick={() => restoreStudent(st)}
-                                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold"
-                                  style={{ color: C.greenDark, background: C.greenSoft }}
-                                >
-                                  <ArchiveRestore className="w-3.5 h-3.5" /> Restore
-                                </button>
-                                <button
-                                  onClick={() => deleteStudentForever(st)}
-                                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold"
-                                  style={{ color: C.red, background: "#fef2f2" }}
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" /> Delete
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
+                  <table className="w-full text-sm min-w-[480px]">
+                    <thead>
+                      <tr className="text-left text-xs" style={{ color: C.muted, background: C.bg }}>
+                        {["Student", "Program", "Actions"].map(h => (
+                          <th key={h} className="py-3 pl-5 pr-4 font-medium">{h}</th>
                         ))}
-                        {shownArchivedStudents.length === 0 && (
-                          <tr>
-                            <td colSpan={5} className="py-10 text-center text-sm" style={{ color: C.muted }}>
-                              {archivedStudents.length === 0
-                                ? "No archived students. Archive a student from the Students tab or a class roster."
-                                : "No archived students match your search."}
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {arcStuPaged.items.length === 0 ? (
+                        <tr><td colSpan={3} className="py-10 text-center text-sm" style={{ color: C.muted }}>No archived students.</td></tr>
+                      ) : arcStuPaged.items.map(s => (
+                        <tr key={s.key} style={{ borderTop: `1px solid ${C.border}` }}>
+                          <td className="py-3 pl-5 pr-4">
+                            <p className="font-semibold" style={{ color: C.text }}>{s.name}</p>
+                            <p className="text-xs" style={{ color: C.muted }}>{s.studentId}</p>
+                          </td>
+                          <td className="py-3 pr-4 text-xs" style={{ color: C.muted }}>{s.program} · Year {s.year} · {s.section}</td>
+                          <td className="py-3 pr-4">
+                            <div className="flex gap-1.5">
+                              <button onClick={() => restoreStudent(s)} title="Restore"
+                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold"
+                                style={{ background: C.greenSoft, color: C.greenDark, border: `1px solid ${C.greenEdge}` }}>
+                                <ArchiveRestore className="w-3.5 h-3.5" /> Restore
+                              </button>
+                              <button onClick={() => deleteStudentForever(s)} title="Delete permanently"
+                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold"
+                                style={{ background: "#fee2e2", color: C.red }}>
+                                <Trash2 className="w-3.5 h-3.5" /> Delete
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                   <Pagination page={arcStuPaged.page} totalPages={arcStuPaged.totalPages} total={arcStuPaged.total} onChange={setArcStuPage} />
                 </section>
-              ) : (
+              )}
+
+              {archiveView === "classes" && (
                 <section className="rounded-2xl overflow-hidden" style={{ background: C.surface, border: `1px solid ${C.border}` }}>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm min-w-[760px]">
-                      <thead>
-                        <tr className="text-left text-xs" style={{ color: C.muted, background: C.bg }}>
-                          <th className="py-3 pl-5 pr-4 font-medium">Class</th>
-                          <th className="py-3 pr-4 font-medium">Subject code</th>
-                          <th className="py-3 pr-4 font-medium">Year</th>
-                          <th className="py-3 pr-4 font-medium">Schedule</th>
-                          <th className="py-3 pr-4 font-medium">Students</th>
-                          <th className="py-3 pr-5 font-medium text-right">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {arcClsPaged.items.map(c => (
-                          <tr key={c.id} style={{ borderTop: `1px solid ${C.border}` }}>
-                            <td className="py-3 pl-5 pr-4">
-                              <div className="flex items-center gap-3">
-                                <div
-                                  className="w-9 h-9 rounded-xl flex items-center justify-center shrink-0"
-                                  style={{ background: "#f3f4f6" }}
-                                >
-                                  <GraduationCap className="w-4 h-4" style={{ color: C.muted }} />
-                                </div>
-                                <span className="font-semibold" style={{ color: C.text }}>{c.name}</span>
-                              </div>
-                            </td>
-                            <td className="py-3 pr-4 font-medium" style={{ color: C.text }}>{c.code}</td>
-                            <td className="py-3 pr-4 font-medium" style={{ color: C.text }}>Year {c.year}</td>
-                            <td className="py-3 pr-4" style={{ color: C.muted }}>{c.schedule} · {c.room}</td>
-                            <td className="py-3 pr-4 font-medium" style={{ color: C.text }}>
-                              {students.filter(s => !s.archived && s.classIds.includes(c.id)).length}
-                            </td>
-                            <td className="py-3 pr-5">
-                              <div className="flex items-center justify-end gap-2">
-                                <button
-                                  onClick={() => restoreClass(c)}
-                                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold"
-                                  style={{ color: C.greenDark, background: C.greenSoft }}
-                                >
-                                  <ArchiveRestore className="w-3.5 h-3.5" /> Restore
-                                </button>
-                                <button
-                                  onClick={() => deleteClassForever(c)}
-                                  className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-semibold"
-                                  style={{ color: C.red, background: "#fef2f2" }}
-                                >
-                                  <Trash2 className="w-3.5 h-3.5" /> Delete
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
+                  <table className="w-full text-sm min-w-[480px]">
+                    <thead>
+                      <tr className="text-left text-xs" style={{ color: C.muted, background: C.bg }}>
+                        {["Class", "Schedule", "Actions"].map(h => (
+                          <th key={h} className="py-3 pl-5 pr-4 font-medium">{h}</th>
                         ))}
-                        {shownArchivedClasses.length === 0 && (
-                          <tr>
-                            <td colSpan={6} className="py-10 text-center text-sm" style={{ color: C.muted }}>
-                              {archivedClasses.length === 0
-                                ? "No archived classes. Open a class and use Archive class."
-                                : "No archived classes match your search."}
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
-                    </table>
-                  </div>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {arcClsPaged.items.length === 0 ? (
+                        <tr><td colSpan={3} className="py-10 text-center text-sm" style={{ color: C.muted }}>No archived classes.</td></tr>
+                      ) : arcClsPaged.items.map(c => (
+                        <tr key={c.key} style={{ borderTop: `1px solid ${C.border}` }}>
+                          <td className="py-3 pl-5 pr-4">
+                            <p className="font-semibold" style={{ color: C.text }}>{c.name} · {c.code}</p>
+                            <p className="text-xs" style={{ color: C.muted }}>Year {c.year}</p>
+                          </td>
+                          <td className="py-3 pr-4 text-xs" style={{ color: C.muted }}>{c.schedule} · {c.room}</td>
+                          <td className="py-3 pr-4">
+                            <div className="flex gap-1.5">
+                              <button onClick={() => restoreClass(c)} title="Restore"
+                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold"
+                                style={{ background: C.greenSoft, color: C.greenDark, border: `1px solid ${C.greenEdge}` }}>
+                                <ArchiveRestore className="w-3.5 h-3.5" /> Restore
+                              </button>
+                              <button onClick={() => deleteClassForever(c)} title="Delete permanently"
+                                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold"
+                                style={{ background: "#fee2e2", color: C.red }}>
+                                <Trash2 className="w-3.5 h-3.5" /> Delete
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                   <Pagination page={arcClsPaged.page} totalPages={arcClsPaged.totalPages} total={arcClsPaged.total} onChange={setArcClsPage} />
                 </section>
               )}
             </>
           )}
+
         </div>
       </main>
 
-      {/* ============================ SIGN OUT CONFIRMATION ============================ */}
-      {confirmSignOut && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center p-4"
-          style={{ background: "rgba(17,24,39,.45)" }}
-          onClick={() => setConfirmSignOut(false)}
-        >
-          <div
-            className="w-full max-w-sm rounded-2xl p-6"
-            style={{ background: C.surface }}
-            onClick={e => e.stopPropagation()}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="signout-title"
-          >
-            <div className="w-11 h-11 rounded-xl flex items-center justify-center mb-4" style={{ background: "#fee2e2" }}>
-              <LogOut className="w-5 h-5" style={{ color: C.red }} />
-            </div>
-            <h2 id="signout-title" className="text-lg font-bold" style={{ color: C.text }}>Sign out?</h2>
-            <p className="text-sm mt-1" style={{ color: C.muted }}>
-              You will need to sign in again to view your classes and attendance records.
-            </p>
-            <div className="flex justify-end gap-2 mt-6">
-              <button
-                onClick={() => setConfirmSignOut(false)}
+      {/* ─── Modals ───────────────────────────────────────────────────── */}
+
+      {showAdd && (
+        <ClassEditorModal
+          editing={!!editingClassId}
+          onClose={() => { setShowAdd(false); setEditingClassId(null); resetClassForm(); }}
+          onSubmit={handleAddClass}
+          name={newName} setName={setNewName}
+          code={newCode} setCode={setNewCode}
+          year={newYear} setYear={setNewYear}
+          room={newRoom} setRoom={setNewRoom}
+          days={newDays} setDays={setNewDays}
+          start={newStart} setStart={setNewStart}
+          end={newEnd} setEnd={setNewEnd}
+          error={classError}
+        />
+      )}
+
+      {addStudentsOpen && openClassItem && (
+        <AddStudentsModal
+          classItem={openClassItem}
+          students={activeStudents.filter(s => !(s.classKeys ?? []).includes(openClassItem.key)).map(s => ({
+            ...s, id: s.key, classIds: s.classKeys ?? [],
+          }))}
+          search={pickSearch} setSearch={setPickSearch}
+          selectedIds={pickIds} setSelectedIds={setPickIds}
+          onAdd={() => addPickedToClass(openClassItem)}
+          onClose={() => setAddStudentsOpen(false)}
+        />
+      )}
+
+      {studentModal && (
+        <StudentModal
+          modal={studentModal}
+          students={activeStudents.map(s => ({ ...s, id: s.key, rfid: s.rfidUid ?? "", classIds: s.classKeys ?? [] }))}
+          classes={activeClasses.map(c => ({ ...c, id: c.key, created: c.createdAt?.substring(0, 10) ?? "" }))}
+          activeClasses={activeClasses.map(c => ({ ...c, id: c.key, created: c.createdAt?.substring(0, 10) ?? "" }))}
+          onClose={() => setStudentModal(null)}
+          onOpen={(mode, st) => {
+            if (!st) { openStudentModal(mode); return; }
+            const sr = activeStudents.find(x => x.key === st.id);
+            if (sr) openStudentModal(mode, sr);
+          }}
+          onSave={handleSaveStudent}
+          firstName={sFirst} setFirstName={setSFirst}
+          lastName={sLast} setLastName={setSLast}
+          emailId={sEmail} setEmailId={setSEmail}
+          program={sProgram} setProgram={setSProgram}
+          year={sYear} setYear={setSYear}
+          section={sSection} setSection={setSSection}
+          rfid={sRfid} setRfid={setSRfid}
+          classIds={sClassIds} onToggleClass={toggleClass}
+          error={sError}
+        />
+      )}
+
+      {/* Confirm dialog */}
+      {confirmDlg && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(17,24,39,.45)" }}>
+          <div className="w-full max-w-sm rounded-2xl p-6" style={{ background: C.surface }}>
+            <h3 className="text-base font-bold mb-1" style={{ color: confirmDlg.tone === "delete" ? C.red : C.text }}>
+              {confirmDlg.title}
+            </h3>
+            <p className="text-sm font-semibold mb-2" style={{ color: C.text }}>{confirmDlg.subject}</p>
+            <p className="text-sm mb-6" style={{ color: C.muted }}>{confirmDlg.message}</p>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setConfirmDlg(null)}
                 className="px-4 py-2.5 rounded-lg text-sm font-medium"
-                style={{ background: C.bg, color: C.muted, border: `1px solid ${C.border}` }}
-              >
+                style={{ background: C.bg, color: C.muted, border: `1px solid ${C.border}` }}>
                 Cancel
               </button>
-              <button
-                onClick={logout}
+              <button onClick={confirmDlg.onConfirm}
                 className="px-4 py-2.5 rounded-lg text-sm font-semibold text-white"
-                style={{ background: C.red }}
-              >
-                Sign out
+                style={{ background: confirmDlg.tone === "delete" ? C.red : C.amber }}>
+                {confirmDlg.confirmLabel}
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* ============================ ARCHIVE / DELETE CONFIRMATION ============================ */}
-      {confirmDlg && (() => {
-        const isDelete = confirmDlg.tone === "delete";
-        const accent = isDelete ? C.red : C.amber;
-        const soft = isDelete ? "#fee2e2" : C.amberSoft;
-        const Icon = isDelete ? Trash2 : Archive;
-        return (
-          <div
-            className="fixed inset-0 z-50 flex items-center justify-center p-4"
-            style={{ background: "rgba(17,24,39,.45)" }}
-            onClick={() => setConfirmDlg(null)}
-          >
-            <div
-              className="w-full max-w-sm rounded-2xl p-6 text-center"
-              style={{ background: C.surface, boxShadow: "0 20px 40px rgba(16,24,40,.18)", animation: "toastIn .2s ease-out" }}
-              onClick={e => e.stopPropagation()}
-              role="dialog"
-              aria-modal="true"
-              aria-labelledby="confirm-title"
-            >
-              <div className="w-12 h-12 rounded-full flex items-center justify-center mx-auto mb-4" style={{ background: soft }}>
-                <Icon className="w-6 h-6" style={{ color: accent }} />
+      {/* Sign-out confirm */}
+      {confirmSignOut && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(17,24,39,.45)" }}>
+          <div className="w-full max-w-sm rounded-2xl p-6" style={{ background: C.surface }}>
+            <h3 className="text-base font-bold mb-2" style={{ color: C.text }}>Sign out?</h3>
+            <p className="text-sm mb-6" style={{ color: C.muted }}>You will be returned to the login page.</p>
+            <div className="flex justify-end gap-2">
+              <button onClick={() => setConfirmSignOut(false)}
+                className="px-4 py-2.5 rounded-lg text-sm font-medium"
+                style={{ background: C.bg, color: C.muted, border: `1px solid ${C.border}` }}>
+                Cancel
+              </button>
+              <button onClick={logout}
+                className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold text-white"
+                style={{ background: C.red }}>
+                <LogOut className="w-4 h-4" /> Sign out
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── Edit Attendance Record Modal ─────────────────────────── */}
+      {editRec && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: "rgba(17,24,39,.45)" }}>
+          <div className="w-full max-w-sm rounded-2xl p-6" style={{ background: C.surface }}>
+            <div className="flex items-center justify-between mb-5">
+              <div>
+                <h3 className="text-base font-bold" style={{ color: C.text }}>Edit Attendance</h3>
+                <p className="text-xs mt-0.5" style={{ color: C.muted }}>
+                  {editRec.student.name} · {editRec.cls.code}
+                </p>
               </div>
-              <h2 id="confirm-title" className="text-lg font-bold" style={{ color: C.text }}>{confirmDlg.title}</h2>
-              <p
-                className="inline-block max-w-full truncate text-sm font-semibold mt-2 px-3 py-1 rounded-lg"
-                style={{ background: C.bg, color: C.text, border: `1px solid ${C.border}` }}
-              >
-                {confirmDlg.subject}
-              </p>
-              <p className="text-sm mt-3" style={{ color: C.muted }}>{confirmDlg.message}</p>
-              <div className="flex gap-2 mt-6">
+              <button onClick={() => setEditRec(null)} style={{ color: C.muted }}>
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-4">
+              {/* Date */}
+              <div>
+                <label className="block text-xs font-medium mb-1.5" style={{ color: C.muted }}>Date</label>
+                <input
+                  type="date"
+                  value={editDate}
+                  onChange={e => setEditDate(e.target.value)}
+                  className="w-full px-3 py-2.5 rounded-lg text-sm outline-none"
+                  style={inputStyle}
+                />
+              </div>
+
+              {/* Status */}
+              <div>
+                <label className="block text-xs font-medium mb-1.5" style={{ color: C.muted }}>Status</label>
+                <div className="grid grid-cols-2 gap-2">
+                  {(["present", "late", "absent", "incomplete"] as const).map(s => (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => setEditStatus(s)}
+                      className="px-3 py-2 rounded-lg text-xs font-semibold capitalize"
+                      style={{
+                        background: editStatus === s ? `${STATUS_META[s].color}20` : C.bg,
+                        color: editStatus === s ? STATUS_META[s].color : C.muted,
+                        border: `1px solid ${editStatus === s ? STATUS_META[s].color : C.border}`,
+                      }}
+                    >
+                      {STATUS_META[s].label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Time In */}
+              <div>
+                <label className="block text-xs font-medium mb-1.5" style={{ color: C.muted }}>Time In</label>
+                <input
+                  type="time"
+                  value={editTimeIn}
+                  onChange={e => setEditTimeIn(e.target.value)}
+                  className="w-full px-3 py-2.5 rounded-lg text-sm outline-none"
+                  style={inputStyle}
+                />
+              </div>
+
+              {/* Time Out */}
+              <div>
+                <label className="block text-xs font-medium mb-1.5" style={{ color: C.muted }}>
+                  Time Out <span style={{ color: C.muted, fontWeight: 400 }}>(optional)</span>
+                </label>
+                <input
+                  type="time"
+                  value={editTimeOut}
+                  onChange={e => setEditTimeOut(e.target.value)}
+                  className="w-full px-3 py-2.5 rounded-lg text-sm outline-none"
+                  style={inputStyle}
+                />
+              </div>
+
+              {editError && <p className="text-xs" style={{ color: C.red }}>{editError}</p>}
+
+              <div className="flex justify-end gap-2 pt-1">
                 <button
-                  onClick={() => setConfirmDlg(null)}
-                  className="flex-1 px-4 py-2.5 rounded-lg text-sm font-medium"
+                  type="button"
+                  onClick={() => setEditRec(null)}
+                  className="px-4 py-2.5 rounded-lg text-sm font-medium"
                   style={{ background: C.bg, color: C.muted, border: `1px solid ${C.border}` }}
                 >
                   Cancel
                 </button>
                 <button
-                  onClick={() => {
-                    confirmDlg.onConfirm();
-                    setConfirmDlg(null);
-                  }}
-                  className="flex-1 px-4 py-2.5 rounded-lg text-sm font-semibold text-white"
-                  style={{ background: accent }}
+                  onClick={handleSaveEditRec}
+                  disabled={editSaving}
+                  className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-semibold text-white disabled:opacity-60"
+                  style={{ background: C.green }}
                 >
-                  {confirmDlg.confirmLabel}
+                  {editSaving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  Save changes
                 </button>
               </div>
             </div>
           </div>
-        );
-      })()}
+        </div>
+      )}
 
-      {/* ============================ TOAST ============================ */}
-      {toast && (() => {
-        const meta = {
-          success: { Icon: CheckCircle2, color: C.green, soft: C.greenSoft },
-          archive: { Icon: Archive, color: C.amber, soft: C.amberSoft },
-          delete: { Icon: Trash2, color: C.red, soft: "#fee2e2" },
-        }[toast.kind];
-        const Icon = meta.Icon;
-        return (
-          <div
-            role="status"
-            aria-live="polite"
-            className="fixed bottom-6 right-6 z-[60] flex items-center gap-3 rounded-xl pl-3 pr-2 py-3 max-w-sm"
-            style={{
-              background: C.surface,
-              border: `1px solid ${C.border}`,
-              boxShadow: "0 8px 24px rgba(16,24,40,.12)",
-              animation: "toastIn .2s ease-out",
-            }}
-          >
-            <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0" style={{ background: meta.soft }}>
-              <Icon className="w-4 h-4" style={{ color: meta.color }} />
-            </div>
-            <p className="text-sm font-medium" style={{ color: C.text }}>{toast.msg}</p>
-            <button onClick={() => setToast(null)} aria-label="Dismiss" className="p-1.5 rounded-md shrink-0" style={{ color: C.muted }}>
-              <X className="w-4 h-4" />
-            </button>
-          </div>
-        );
-      })()}
-
-      {showAdd && <ClassEditorModal
-        editing={editingClassId !== null}
-        onClose={() => setShowAdd(false)}
-        onSubmit={handleAddClass}
-        name={newName}
-        setName={setNewName}
-        code={newCode}
-        setCode={setNewCode}
-        year={newYear}
-        setYear={setNewYear}
-        room={newRoom}
-        setRoom={setNewRoom}
-        days={newDays}
-        setDays={setNewDays}
-        start={newStart}
-        setStart={setNewStart}
-        end={newEnd}
-        setEnd={setNewEnd}
-        error={classError}
-      />}
-
-      {addStudentsOpen && openClassItem && <AddStudentsModal
-        classItem={openClassItem}
-        students={activeStudents}
-        search={pickSearch}
-        setSearch={setPickSearch}
-        selectedIds={pickIds}
-        setSelectedIds={setPickIds}
-        onAdd={addPickedToClass}
-        onClose={() => setAddStudentsOpen(false)}
-      />}
-
-      {studentModal && <StudentModal
-        modal={studentModal}
-        students={students}
-        classes={classes}
-        activeClasses={activeClasses}
-        onClose={() => setStudentModal(null)}
-        onOpen={openStudentModal}
-        onSave={handleSaveStudent}
-        firstName={sFirst}
-        setFirstName={setSFirst}
-        lastName={sLast}
-        setLastName={setSLast}
-        emailId={sEmail}
-        setEmailId={setSEmail}
-        program={sProgram}
-        setProgram={setSProgram}
-        year={sYear}
-        setYear={setSYear}
-        section={sSection}
-        setSection={setSSection}
-        rfid={sRfid}
-        setRfid={setSRfid}
-        classIds={sClassIds}
-        onToggleClass={toggleClass}
-        error={sError}
-      />}
+      {/* Toast */}
+      {toast && (        <div className="fixed bottom-6 right-6 z-[200] px-5 py-3.5 rounded-2xl text-sm font-semibold text-white shadow-xl"
+          style={{
+            background: toast.kind === "delete" ? C.red : toast.kind === "archive" ? C.amber : toast.kind === "error" ? C.red : C.green,
+            animation: "toastIn .3s ease both",
+          }}>
+          {toast.msg}
+        </div>
+      )}
     </div>
   );
 }

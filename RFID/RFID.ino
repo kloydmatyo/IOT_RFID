@@ -10,6 +10,14 @@
  *   Buzzer       -> GPIO 22
  *   OLED SDA     -> GPIO 16
  *   OLED SCL     -> GPIO 17
+ *
+ * Firebase paths used:
+ *   /activeSessions/{DEVICE_ID}         – read: classKey, className, classCode, active
+ *   /students                           – read: rfidUid, name, studentId, classKeys
+ *   /attendance/{classKey}/{date}/{studentKey} – write: tap-in / tap-out records
+ *   /accessLogs                         – write: every scan (admin dashboard)
+ *   /devices/{DEVICE_ID}               – write: heartbeat
+ *   /authorizedCards                    – read: admin-registered cards (legacy check)
  */
 
 #include <SPI.h>
@@ -53,36 +61,51 @@
 // ─── Timing Constants ────────────────────────────────────────────────────────
 #define HEARTBEAT_INTERVAL    30000   // 30 seconds
 #define AUTH_SYNC_INTERVAL    60000   // 1 minute
+#define SESSION_SYNC_INTERVAL 10000   // 10 seconds – check for active class session
 #define NTP_RETRY_INTERVAL    5000    // 5 seconds
+#define SCAN_COOLDOWN         2000    // prevent duplicate scans
+
+// ─── Late threshold ──────────────────────────────────────────────────────────
+// Minutes after class start time before a tap is considered "late"
+#define LATE_GRACE_MIN 15
 
 // ─── Objects ─────────────────────────────────────────────────────────────────
 MFRC522 rfid(SS_PIN, RST_PIN);
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 FirebaseData fbData;
+FirebaseData fbData2;   // second stream for student lookup (avoids reuse conflict)
 FirebaseAuth fbAuth;
 FirebaseConfig fbConfig;
 
 // ─── State Variables ─────────────────────────────────────────────────────────
-bool oledReady        = false;
-bool firebaseReady    = false;
-bool timeReady        = false;
+bool oledReady     = false;
+bool firebaseReady = false;
+bool timeReady     = false;
 
-unsigned long lastHeartbeat   = 0;
-unsigned long lastAuthSync    = 0;
-unsigned long lastScanTime    = 0;
-const unsigned long SCAN_COOLDOWN = 2000; // prevent duplicate scans
+unsigned long lastHeartbeat    = 0;
+unsigned long lastAuthSync     = 0;
+unsigned long lastSessionSync  = 0;
+unsigned long lastScanTime     = 0;
 
-// ─── Authorized UIDs (local cache, synced from Firebase) ─────────────────────
-// Format: comma-separated hex bytes, e.g. "3C:18:19:49"
-#define MAX_AUTHORIZED  20
+// ─── Authorized UIDs cache (for admin /accessLogs path) ──────────────────────
+#define MAX_AUTHORIZED 20
 String authorizedUIDs[MAX_AUTHORIZED];
-int authorizedCount = 0;
-
-// Fallback hardcoded UID used if Firebase is unreachable on first boot
-// Replace with your actual key fob UID
+int    authorizedCount = 0;
 const String FALLBACK_UID = "3C:18:19:49";
 
-// ─── Offline Log Queue ────────────────────────────────────────────────────────
+// ─── Active session (set by the teacher via the web app) ─────────────────────
+struct ActiveSession {
+  bool   active      = false;
+  String classKey;
+  String className;
+  String classCode;
+  String teacherUid;
+  String startedAt;   // ISO timestamp stored by the web app
+  String classStart;  // "HH:MM" scheduled class start, e.g. "08:00"
+};
+ActiveSession currentSession;
+
+// ─── Offline log queue ────────────────────────────────────────────────────────
 #define MAX_QUEUE 10
 struct LogEntry {
   String uid;
@@ -93,6 +116,17 @@ struct LogEntry {
 };
 LogEntry logQueue[MAX_QUEUE];
 int queueCount = 0;
+
+// ─── Student lookup result ────────────────────────────────────────────────────
+struct StudentInfo {
+  bool   found      = false;
+  String key;          // Firebase push key
+  String name;
+  String studentId;
+  String rfidUid;
+  String classKeys[10];
+  int    classCount = 0;
+};
 
 // ────────────────────────────────────────────────────────────────────────────
 // Utility: Format UID bytes to colon-separated hex string
@@ -108,8 +142,22 @@ String formatUID(byte *uid, byte size) {
   return result;
 }
 
+/**
+ * Plain UID without separators – matches how students are stored in Firebase
+ * e.g. "3C:18:19:49" → "3C181949"
+ */
+String uidPlain(byte *uid, byte size) {
+  String result = "";
+  for (byte i = 0; i < size; i++) {
+    if (uid[i] < 0x10) result += "0";
+    result += String(uid[i], HEX);
+  }
+  result.toUpperCase();
+  return result;
+}
+
 // ────────────────────────────────────────────────────────────────────────────
-// Utility: Get current ISO8601 timestamp
+// Utility: Get current ISO8601 timestamp (UTC)
 // ────────────────────────────────────────────────────────────────────────────
 String getTimestamp() {
   if (!timeReady) return "1970-01-01T00:00:00Z";
@@ -120,6 +168,35 @@ String getTimestamp() {
   char buf[30];
   strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
   return String(buf);
+}
+
+// Returns "YYYY-MM-DD" in local time (UTC+8 baked into configTime)
+String getLocalDatePH() {
+  if (!timeReady) return "1970-01-01";
+  time_t now = time(nullptr);
+  struct tm ti;
+  localtime_r(&now, &ti);
+  char buf[12];
+  strftime(buf, sizeof(buf), "%Y-%m-%d", &ti);
+  return String(buf);
+}
+
+// Returns current minutes-since-midnight in local time
+int getLocalMinutesPH() {
+  if (!timeReady) return 0;
+  time_t now = time(nullptr);
+  struct tm ti;
+  localtime_r(&now, &ti);
+  return ti.tm_hour * 60 + ti.tm_min;
+}
+
+// Returns epoch milliseconds as String
+String getEpochMs() {
+  if (!timeReady) return "0";
+  struct timeval tv;
+  gettimeofday(&tv, nullptr);
+  unsigned long long ms = (unsigned long long)tv.tv_sec * 1000ULL + tv.tv_usec / 1000ULL;
+  return String(ms);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -180,19 +257,25 @@ void connectWiFi() {
 // NTP Time Sync
 // ────────────────────────────────────────────────────────────────────────────
 void syncTime() {
-  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  // UTC+8 (Philippines) — baked into configTime so local date helpers work directly
+  configTime(8 * 3600, 0, "pool.ntp.org", "time.nist.gov", "time.google.com");
   Serial.print("Syncing time");
+
+  // Wait up to 20 seconds, polling every 500 ms
   unsigned long start = millis();
-  while (!time(nullptr) && millis() - start < 10000) {
-    delay(NTP_RETRY_INTERVAL);
+  time_t now = 0;
+  while (millis() - start < 20000) {
+    delay(500);
     Serial.print(".");
+    now = time(nullptr);
+    if (now > 100000UL) break;  // valid epoch (well past 1970-01-01)
   }
-  time_t now = time(nullptr);
-  if (now > 1000) {
+
+  if (now > 100000UL) {
     timeReady = true;
     Serial.println("\nTime synced: " + String(ctime(&now)));
   } else {
-    Serial.println("\nTime sync failed");
+    Serial.println("\nTime sync failed - timestamps will show 1970");
   }
 }
 
@@ -206,23 +289,23 @@ void initFirebase() {
   Firebase.begin(&fbConfig, &fbAuth);
   Firebase.reconnectWiFi(true);
   fbData.setResponseSize(4096);
+  fbData2.setResponseSize(4096);
 
   firebaseReady = true;
   Serial.println("Firebase initialized");
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Sync Authorized UIDs from Firebase
+// Sync Authorized UIDs from /authorizedCards (admin side, for access log)
 // ────────────────────────────────────────────────────────────────────────────
 void syncAuthorizedUIDs() {
   if (!firebaseReady || WiFi.status() != WL_CONNECTED) return;
 
-  Serial.println("Syncing authorized UIDs from Firebase...");
+  Serial.println("Syncing authorized UIDs...");
   authorizedCount = 0;
 
   if (Firebase.getJSON(fbData, "/authorizedCards")) {
     FirebaseJson &json = fbData.jsonObject();
-    FirebaseJsonData result;
     size_t len = json.iteratorBegin();
 
     for (size_t i = 0; i < len && authorizedCount < MAX_AUTHORIZED; i++) {
@@ -230,10 +313,8 @@ void syncAuthorizedUIDs() {
       int type;
       json.iteratorGet(i, type, key, val);
 
-      // Each entry: { "uid": "3C:18:19:49", "active": true, ... }
       FirebaseJson entry;
       entry.setJsonData(val);
-
       FirebaseJsonData uidData, activeData;
       entry.get(uidData, "uid");
       entry.get(activeData, "active");
@@ -241,10 +322,8 @@ void syncAuthorizedUIDs() {
       if (uidData.success) {
         bool active = true;
         if (activeData.success) active = activeData.boolValue;
-
         if (active) {
           authorizedUIDs[authorizedCount++] = uidData.stringValue;
-          Serial.println("  Loaded: " + uidData.stringValue);
         }
       }
     }
@@ -252,17 +331,12 @@ void syncAuthorizedUIDs() {
     Serial.printf("Loaded %d authorized UIDs\n", authorizedCount);
   } else {
     Serial.println("Failed to sync UIDs: " + fbData.errorReason());
-    // Load fallback UID if nothing cached yet
     if (authorizedCount == 0) {
       authorizedUIDs[authorizedCount++] = FALLBACK_UID;
-      Serial.println("Using fallback UID: " + FALLBACK_UID);
     }
   }
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Check if a UID is authorized
-// ────────────────────────────────────────────────────────────────────────────
 bool isAuthorized(const String &uid) {
   for (int i = 0; i < authorizedCount; i++) {
     if (authorizedUIDs[i].equalsIgnoreCase(uid)) return true;
@@ -271,49 +345,160 @@ bool isAuthorized(const String &uid) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Lookup cardholder name from Firebase
+// Sync Active Session from Firebase
 // ────────────────────────────────────────────────────────────────────────────
-String getCardholderName(const String &uid) {
-  if (!firebaseReady || WiFi.status() != WL_CONNECTED) return "Unknown";
+void syncActiveSession() {
+  if (!firebaseReady || WiFi.status() != WL_CONNECTED) return;
 
-  // Search authorizedCards for matching UID
-  if (Firebase.getJSON(fbData, "/authorizedCards")) {
-    FirebaseJson &json = fbData.jsonObject();
-    size_t len = json.iteratorBegin();
-
-    for (size_t i = 0; i < len; i++) {
-      String key, val;
-      int type;
-      json.iteratorGet(i, type, key, val);
-
-      FirebaseJson entry;
-      entry.setJsonData(val);
-
-      FirebaseJsonData uidData, nameData;
-      entry.get(uidData, "uid");
-      entry.get(nameData, "name");
-
-      if (uidData.success && uidData.stringValue.equalsIgnoreCase(uid)) {
-        json.iteratorEnd();
-        return nameData.success ? nameData.stringValue : "Unknown";
-      }
-    }
-    json.iteratorEnd();
+  String path = "/activeSessions/" + String(DEVICE_ID);
+  if (!Firebase.getJSON(fbData, path)) {
+    // No session node at all – clear
+    currentSession.active = false;
+    return;
   }
-  return "Unknown";
+
+  FirebaseJson &json = fbData.jsonObject();
+  FirebaseJsonData activeData, classKeyData, classNameData, classCodeData,
+                   teacherData, startedAtData, classStartData;
+
+  json.get(activeData,     "active");
+  json.get(classKeyData,   "classKey");
+  json.get(classNameData,  "className");
+  json.get(classCodeData,  "classCode");
+  json.get(teacherData,    "teacherUid");
+  json.get(startedAtData,  "startedAt");
+  json.get(classStartData, "classStart");
+
+  bool sessionActive = activeData.success && activeData.boolValue;
+
+  if (!sessionActive) {
+    currentSession.active = false;
+    Serial.println("No active session.");
+    return;
+  }
+
+  currentSession.active     = true;
+  currentSession.classKey   = classKeyData.success  ? classKeyData.stringValue  : "";
+  currentSession.className  = classNameData.success ? classNameData.stringValue : "";
+  currentSession.classCode  = classCodeData.success ? classCodeData.stringValue : "";
+  currentSession.teacherUid = teacherData.success   ? teacherData.stringValue   : "";
+  currentSession.startedAt  = startedAtData.success  ? startedAtData.stringValue : "";
+  currentSession.classStart = classStartData.success ? classStartData.stringValue : "";
+
+  Serial.println("Active session: " + currentSession.className + " / " + currentSession.classKey);
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Upload access log to Firebase (or queue if offline)
+// Look up a student in /students by plain UID (e.g. "7F3A91C2")
+// Returns: studentKey in `outKey`, populates name/studentId/classKeys
+// ────────────────────────────────────────────────────────────────────────────
+StudentInfo lookupStudentByUID(const String &plainUID) {
+  StudentInfo info;
+  if (!firebaseReady || WiFi.status() != WL_CONNECTED) return info;
+
+  if (!Firebase.getJSON(fbData2, "/students")) {
+    Serial.println("Failed to read /students: " + fbData2.errorReason());
+    return info;
+  }
+
+  FirebaseJson &root = fbData2.jsonObject();
+  size_t len = root.iteratorBegin();
+
+  for (size_t i = 0; i < len; i++) {
+    String key, val;
+    int type;
+    root.iteratorGet(i, type, key, val);
+
+    FirebaseJson entry;
+    entry.setJsonData(val);
+
+    FirebaseJsonData rfidData;
+    entry.get(rfidData, "rfidUid");
+
+    if (rfidData.success && rfidData.stringValue.equalsIgnoreCase(plainUID)) {
+      info.found = true;
+      info.key   = key;
+
+      FirebaseJsonData nameData, idData;
+      entry.get(nameData, "name");
+      entry.get(idData,   "studentId");
+      info.name      = nameData.success ? nameData.stringValue : "Unknown";
+      info.studentId = idData.success   ? idData.stringValue   : "";
+      info.rfidUid   = plainUID;
+
+      // Parse classKeys array
+      FirebaseJson classKeysJson;
+      FirebaseJsonData classKeysData;
+      entry.get(classKeysData, "classKeys");
+      if (classKeysData.success && classKeysData.type == "array") {
+        classKeysJson.setJsonData(classKeysData.stringValue);
+        size_t cLen = classKeysJson.iteratorBegin();
+        for (size_t c = 0; c < cLen && info.classCount < 10; c++) {
+          String ck, cv;
+          int ct;
+          classKeysJson.iteratorGet(c, ct, ck, cv);
+          if (cv.startsWith("\"")) cv = cv.substring(1, cv.length() - 1);
+          info.classKeys[info.classCount++] = cv;
+        }
+        classKeysJson.iteratorEnd();
+      }
+      break;
+    }
+  }
+  root.iteratorEnd();
+  return info;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Write attendance record to Firebase
+// Path: /attendance/{classKey}/{date}/{studentKey}
+// ────────────────────────────────────────────────────────────────────────────
+void writeAttendance(const String &classKey, const String &date,
+                     const StudentInfo &student, bool isTapOut,
+                     unsigned long long epochMs, const String &status) {
+  String path = "/attendance/" + classKey + "/" + date + "/" + student.key;
+
+  // Check if a tap-in record already exists
+  bool existing = false;
+  if (Firebase.getJSON(fbData, path)) {
+    existing = true;
+  }
+
+  FirebaseJson rec;
+
+  if (isTapOut && existing) {
+    // Second tap: only update timeOutMs
+    rec.set("timeOutMs", (int64_t)epochMs);
+    Firebase.updateNode(fbData, path, rec);
+    Serial.println("Tap-OUT recorded for: " + student.name);
+  } else if (!existing) {
+    // First tap: create full record
+    rec.set("studentKey",  student.key);
+    rec.set("studentId",   student.studentId);
+    rec.set("studentName", student.name);
+    rec.set("classKey",    classKey);
+    rec.set("date",        date);
+    rec.set("status",      status);
+    rec.set("timeInMs",    (int64_t)epochMs);
+    rec.set("writtenBy",   "rfid");
+    Firebase.set(fbData, path, rec);
+    Serial.println("Tap-IN recorded for: " + student.name + " [" + status + "]");
+  } else {
+    // Already has a tap-in — treat as tap-out
+    rec.set("timeOutMs", (int64_t)epochMs);
+    Firebase.updateNode(fbData, path, rec);
+    Serial.println("Tap-OUT (2nd tap) recorded for: " + student.name);
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Upload access log to /accessLogs (admin dashboard)
 // ────────────────────────────────────────────────────────────────────────────
 void uploadAccessLog(const String &uid, const String &name,
                      bool authorized, const String &timestamp) {
   if (!firebaseReady || WiFi.status() != WL_CONNECTED) {
-    // Queue for later upload
     if (queueCount < MAX_QUEUE) {
-      logQueue[queueCount] = {uid, name, authorized, timestamp, true};
-      queueCount++;
-      Serial.println("Log queued (offline): " + uid);
+      logQueue[queueCount++] = {uid, name, authorized, timestamp, true};
     }
     return;
   }
@@ -327,26 +512,10 @@ void uploadAccessLog(const String &uid, const String &name,
   logEntry.set("deviceId",   DEVICE_ID);
   logEntry.set("deviceName", DEVICE_NAME);
 
-  String path = "/accessLogs/" + String(millis());
-
-  if (Firebase.pushJSON(fbData, "/accessLogs", logEntry)) {
-    Serial.println("Log uploaded: " + uid + " -> " + (authorized ? "Granted" : "Denied"));
-
-    // Update dashboard counters atomically
-    Firebase.setTimestamp(fbData, "/devices/" + String(DEVICE_ID) + "/lastScan");
-
-    if (authorized) {
-      Firebase.setInt(fbData, "/stats/authorizedCount",
-        fbData.intData() + 1);
-    } else {
-      Firebase.setInt(fbData, "/stats/unauthorizedCount",
-        fbData.intData() + 1);
-    }
-  } else {
-    Serial.println("Upload failed: " + fbData.errorReason());
+  if (!Firebase.pushJSON(fbData, "/accessLogs", logEntry)) {
+    Serial.println("Access log upload failed: " + fbData.errorReason());
     if (queueCount < MAX_QUEUE) {
-      logQueue[queueCount] = {uid, name, authorized, timestamp, true};
-      queueCount++;
+      logQueue[queueCount++] = {uid, name, authorized, timestamp, true};
     }
   }
 }
@@ -364,38 +533,45 @@ void flushLogQueue() {
     }
   }
   queueCount = 0;
-  Serial.println("Log queue flushed");
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Heartbeat – update device last-seen and online status
+// Heartbeat
 // ────────────────────────────────────────────────────────────────────────────
 void sendHeartbeat() {
   if (!firebaseReady || WiFi.status() != WL_CONNECTED) return;
 
   String basePath = "/devices/" + String(DEVICE_ID);
-  FirebaseJson deviceInfo;
-  deviceInfo.set("deviceId",   DEVICE_ID);
-  deviceInfo.set("deviceName", DEVICE_NAME);
-  deviceInfo.set("online",     true);
-  deviceInfo.set("lastSeen",   getTimestamp());
-  deviceInfo.set("ip",         WiFi.localIP().toString());
-  deviceInfo.set("rssi",       WiFi.RSSI());
-  deviceInfo.set("freeHeap",   ESP.getFreeHeap());
+  FirebaseJson info;
+  info.set("deviceId",   DEVICE_ID);
+  info.set("deviceName", DEVICE_NAME);
+  info.set("online",     true);
+  info.set("lastSeen",   getTimestamp());
+  info.set("ip",         WiFi.localIP().toString());
+  info.set("rssi",       WiFi.RSSI());
+  info.set("freeHeap",   ESP.getFreeHeap());
 
-  if (Firebase.updateNode(fbData, basePath, deviceInfo)) {
-    Serial.println("Heartbeat sent");
+  // Report whether a class session is active
+  if (currentSession.active) {
+    info.set("activeClass",     currentSession.className);
+    info.set("activeClassCode", currentSession.classCode);
   } else {
+    info.set("activeClass",     "—");
+    info.set("activeClassCode", "—");
+  }
+
+  if (!Firebase.updateNode(fbData, basePath, info)) {
     Serial.println("Heartbeat failed: " + fbData.errorReason());
   }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// Handle AUTHORIZED access
+// Handle AUTHORIZED access (green LED + short beep)
 // ────────────────────────────────────────────────────────────────────────────
-void handleAuthorized(const String &uid, const String &name) {
-  Serial.println("ACCESS GRANTED: " + uid + " (" + name + ")");
-  showMessage("Access Granted", ("Welcome, " + name).c_str());
+void handleAuthorized(const String &name, const String &status) {
+  Serial.println("ACCESS OK: " + name + " [" + status + "]");
+  String line2 = (status == "late") ? "Late: " + name : "Welcome, " + name;
+  showMessage(status == "late" ? "Late Tap-In" : "Tap-In OK", line2.c_str());
 
   digitalWrite(Green_LED, HIGH);
   digitalWrite(BUZZER_PIN, HIGH);
@@ -405,19 +581,30 @@ void handleAuthorized(const String &uid, const String &name) {
   digitalWrite(Green_LED, LOW);
 }
 
+void handleTapOut(const String &name) {
+  Serial.println("TAP-OUT: " + name);
+  showMessage("Tap-Out OK", ("Bye, " + name).c_str());
+
+  digitalWrite(Green_LED, HIGH);
+  for (byte b = 0; b < 2; b++) {
+    digitalWrite(BUZZER_PIN, HIGH); delay(100);
+    digitalWrite(BUZZER_PIN, LOW);  delay(100);
+  }
+  delay(1400);
+  digitalWrite(Green_LED, LOW);
+}
+
 // ────────────────────────────────────────────────────────────────────────────
-// Handle UNAUTHORIZED access
+// Handle UNAUTHORIZED / not enrolled
 // ────────────────────────────────────────────────────────────────────────────
-void handleUnauthorized(const String &uid) {
+void handleUnauthorized(const String &uid, const char *reason = "Unknown card") {
   Serial.println("ACCESS DENIED: " + uid);
-  showMessage("Access Denied", "Unknown card");
+  showMessage("Access Denied", reason);
 
   digitalWrite(Red_LED, HIGH);
-  for (byte beep = 0; beep < 2; beep++) {
-    digitalWrite(BUZZER_PIN, HIGH);
-    delay(200);
-    digitalWrite(BUZZER_PIN, LOW);
-    delay(200);
+  for (byte b = 0; b < 2; b++) {
+    digitalWrite(BUZZER_PIN, HIGH); delay(200);
+    digitalWrite(BUZZER_PIN, LOW);  delay(200);
   }
   delay(1200);
   digitalWrite(Red_LED, LOW);
@@ -429,9 +616,9 @@ void handleUnauthorized(const String &uid) {
 void setup() {
   Serial.begin(115200);
   delay(100);
-  Serial.println("\n=== RFID Access Control System ===");
+  Serial.println("\n=== RFID Attendance System ===");
 
-  // GPIO setup
+  // GPIO
   pinMode(Green_LED,  OUTPUT);
   pinMode(Red_LED,    OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
@@ -445,8 +632,6 @@ void setup() {
     Serial.println("OLED init failed");
   } else {
     oledReady = true;
-    display.setTextSize(1);
-    display.setTextColor(SSD1306_WHITE);
     showMessage("Booting...", "Please wait");
   }
 
@@ -462,15 +647,19 @@ void setup() {
     syncTime();
     initFirebase();
     syncAuthorizedUIDs();
+    syncActiveSession();
     sendHeartbeat();
   } else {
-    // Load fallback UID for offline operation
     authorizedUIDs[authorizedCount++] = FALLBACK_UID;
-    Serial.println("Offline: using fallback UID");
   }
 
-  showMessage("RFID Ready", "Scan a card...");
-  Serial.println("System ready. Waiting for card...\n");
+  if (currentSession.active) {
+    String ready = currentSession.className + " " + currentSession.classCode;
+    showMessage("Ready", ready.c_str());
+  } else {
+    showMessage("RFID Ready", "No active session");
+  }
+  Serial.println("System ready.\n");
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -479,56 +668,171 @@ void setup() {
 void loop() {
   unsigned long now = millis();
 
-  // ── Heartbeat ──────────────────────────────────────────────────────────────
+  // Heartbeat
   if (now - lastHeartbeat >= HEARTBEAT_INTERVAL) {
     lastHeartbeat = now;
     sendHeartbeat();
     flushLogQueue();
   }
 
-  // ── Auth sync ──────────────────────────────────────────────────────────────
+  // Auth sync (admin cards)
   if (now - lastAuthSync >= AUTH_SYNC_INTERVAL) {
     lastAuthSync = now;
     syncAuthorizedUIDs();
   }
 
-  // ── WiFi reconnect ─────────────────────────────────────────────────────────
+  // Session sync (which class is active)
+  if (now - lastSessionSync >= SESSION_SYNC_INTERVAL) {
+    lastSessionSync = now;
+    syncActiveSession();
+
+    // Update OLED to reflect current session state
+    if (currentSession.active) {
+      String line = currentSession.className + " " + currentSession.classCode;
+      showMessage("Session Active", line.c_str());
+    } else {
+      showMessage("RFID Ready", "No active session");
+    }
+  }
+
+  // WiFi reconnect
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi lost – reconnecting...");
     showMessage("WiFi Lost", "Reconnecting...");
     connectWiFi();
-    if (WiFi.status() == WL_CONNECTED && !timeReady) syncTime();
-    if (WiFi.status() == WL_CONNECTED && !firebaseReady) {
-      initFirebase();
-      syncAuthorizedUIDs();
+    if (WiFi.status() == WL_CONNECTED) {
+      if (!timeReady)     syncTime();
+      if (!firebaseReady) { initFirebase(); syncAuthorizedUIDs(); }
+      syncActiveSession();
     }
   }
 
-  // ── Scan cooldown: ignore rapid repeated reads ──────────────────────────────
+  // Scan cooldown
   if (now - lastScanTime < SCAN_COOLDOWN) return;
 
-  // ── Wait for RFID card ─────────────────────────────────────────────────────
+  // Wait for card
   if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) return;
 
   lastScanTime = now;
 
-  String uid = formatUID(rfid.uid.uidByte, rfid.uid.size);
-  String timestamp = getTimestamp();
-  Serial.println("Card detected: " + uid);
-
-  bool auth = isAuthorized(uid);
-  String name = auth ? getCardholderName(uid) : "Unknown";
-
-  if (auth) {
-    handleAuthorized(uid, name);
-  } else {
-    handleUnauthorized(uid);
+  String uidFormatted = formatUID(rfid.uid.uidByte, rfid.uid.size);
+  String uidPlainStr  = uidPlain(rfid.uid.uidByte, rfid.uid.size);
+  String timestamp    = getTimestamp();
+  String date         = getLocalDatePH();
+  unsigned long long epochMs = 0;
+  {
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    epochMs = (unsigned long long)tv.tv_sec * 1000ULL + tv.tv_usec / 1000ULL;
   }
 
-  // Upload log (queued if offline)
-  uploadAccessLog(uid, name, auth, timestamp);
+  Serial.println("Card: " + uidFormatted + " (plain: " + uidPlainStr + ")");
+
+  // ── Teacher attendance path ───────────────────────────────────────────────
+  if (currentSession.active && currentSession.classKey.length() > 0) {
+    StudentInfo student = lookupStudentByUID(uidPlainStr);
+
+    if (!student.found) {
+      // Not in /students at all
+      handleUnauthorized(uidFormatted, "Not registered");
+      uploadAccessLog(uidFormatted, "Unknown", false, timestamp);
+    } else {
+      // Check if enrolled in the active class
+      bool enrolled = false;
+      for (int i = 0; i < student.classCount; i++) {
+        if (student.classKeys[i] == currentSession.classKey) {
+          enrolled = true;
+          break;
+        }
+      }
+
+      if (!enrolled) {
+        handleUnauthorized(uidFormatted, "Not in class");
+        uploadAccessLog(uidFormatted, student.name, false, timestamp);
+      } else {
+        // Determine tap-in status
+        String attPath = "/attendance/" + currentSession.classKey + "/" + date + "/" + student.key;
+        bool hasTapIn  = Firebase.getJSON(fbData, attPath);
+        bool hasTapOut = false;
+
+        if (hasTapIn) {
+          FirebaseJson &rec = fbData.jsonObject();
+          FirebaseJsonData tapOutData;
+          rec.get(tapOutData, "timeOutMs");
+          hasTapOut = tapOutData.success;
+        }
+
+        if (!hasTapIn) {
+          // First tap → tap-in, check lateness against scheduled class start
+          String status = "present";
+          if (timeReady && currentSession.classStart.length() == 5) {
+            int classHour = currentSession.classStart.substring(0, 2).toInt();
+            int classMin  = currentSession.classStart.substring(3, 5).toInt();
+            int classStartTotalMin = classHour * 60 + classMin;
+            int nowMin = getLocalMinutesPH();
+            if (nowMin > classStartTotalMin + LATE_GRACE_MIN) {
+              status = "late";
+            }
+            Serial.printf("Class start: %02d:%02d | Now: %d min | Threshold: %d | Status: %s\n",
+              classHour, classMin, nowMin, classStartTotalMin + LATE_GRACE_MIN, status.c_str());
+          }
+          writeAttendance(currentSession.classKey, date, student, false, epochMs, status);
+          handleAuthorized(student.name, status);
+          uploadAccessLog(uidFormatted, student.name, true, timestamp);
+
+        } else if (hasTapIn && !hasTapOut) {
+          // Second tap → tap-out
+          writeAttendance(currentSession.classKey, date, student, true, epochMs, "");
+          handleTapOut(student.name);
+          uploadAccessLog(uidFormatted, student.name, true, timestamp);
+
+        } else {
+          // Already has both tap-in and tap-out
+          showMessage("Already tapped", student.name.c_str());
+          delay(2000);
+        }
+      }
+    }
+  }
+  // ── Admin-only path (no active session) ───────────────────────────────────
+  else {
+    bool auth = isAuthorized(uidFormatted);
+    String name = "Unknown";
+
+    if (auth) {
+      // Try to get name from /authorizedCards
+      if (Firebase.getJSON(fbData, "/authorizedCards")) {
+        FirebaseJson &json = fbData.jsonObject();
+        size_t len = json.iteratorBegin();
+        for (size_t i = 0; i < len; i++) {
+          String key, val; int type;
+          json.iteratorGet(i, type, key, val);
+          FirebaseJson entry; entry.setJsonData(val);
+          FirebaseJsonData uidData, nameData;
+          entry.get(uidData, "uid");
+          entry.get(nameData, "name");
+          if (uidData.success && uidData.stringValue.equalsIgnoreCase(uidFormatted)) {
+            if (nameData.success) name = nameData.stringValue;
+            break;
+          }
+        }
+        json.iteratorEnd();
+      }
+      handleAuthorized(name, "present");
+    } else {
+      handleUnauthorized(uidFormatted, "Unknown card");
+    }
+    uploadAccessLog(uidFormatted, name, auth, timestamp);
+  }
 
   rfid.PICC_HaltA();
   rfid.PCD_StopCrypto1();
-  showMessage("RFID Ready", "Scan a card...");
+
+  // Restore OLED
+  if (currentSession.active) {
+    String line = currentSession.className + " " + currentSession.classCode;
+    showMessage("Session Active", line.c_str());
+  } else {
+    showMessage("RFID Ready", "Scan a card...");
+  }
 }

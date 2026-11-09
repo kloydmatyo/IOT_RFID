@@ -5,7 +5,9 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Mail, Lock, Loader2, Eye, EyeOff, ArrowLeft, CreditCard, LayoutDashboard, Download, ShieldCheck, GraduationCap, ArrowRight } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
-import { TEST_TEACHER, TEACHER_SESSION_KEY } from "@/lib/mockTeacher";
+import { TEACHER_SESSION_KEY } from "@/lib/mockTeacher";
+import { get, ref } from "firebase/database";
+import { db } from "@/lib/firebase";
 
 const SITE_NAME = "GC RFID Attendance";
 
@@ -39,27 +41,36 @@ export default function LoginPage() {
     setError("");
     setLoading(true);
 
-    // Teacher login (test account, no database / Firebase)
-    if (role === "teacher") {
-      if (email === TEST_TEACHER.email && password === TEST_TEACHER.password) {
+    try {
+      await login(email, password);
+
+      if (role === "teacher") {
+        // Verify the logged-in user is actually a teacher
+        const { auth: firebaseAuth } = await import("@/lib/firebase");
+        const uid = firebaseAuth.currentUser?.uid;
+        if (!uid) throw new Error("auth/user-not-found");
+
+        const snap = await get(ref(db, `/teacher/${uid}`));
+        if (!snap.exists()) {
+          // Not a teacher account — sign them out and show an error
+          const { signOut } = await import("firebase/auth");
+          await signOut(firebaseAuth);
+          setError("No teacher account found for these credentials.");
+          setLoading(false);
+          return;
+        }
+
+        const profile = snap.val();
         sessionStorage.setItem(
           TEACHER_SESSION_KEY,
-          JSON.stringify({ name: TEST_TEACHER.name, email: TEST_TEACHER.email })
+          JSON.stringify({ name: profile.name, email: profile.email, uid })
         );
         router.replace("/teacher");
       } else {
-        setError("Invalid teacher email or password.");
+        router.replace("/dashboard");
       }
-      setLoading(false);
-      return;
-    }
-
-    // Admin login (Firebase)
-    try {
-      await login(email, password);
-      router.replace("/dashboard");
     } catch (err: unknown) {
-      const code = (err as { code?: string }).code ?? "";
+      const code = (err as { code?: string }).code ?? (err as Error).message ?? "";
       if (code === "auth/user-not-found" || code === "auth/wrong-password" || code === "auth/invalid-credential") {
         setError("Invalid email or password.");
       } else if (code === "auth/too-many-requests") {
@@ -268,13 +279,6 @@ export default function LoginPage() {
                 style={{ background: C.redSoft, color: C.red, border: "1px solid #fecaca" }}
               >
                 {error}
-              </p>
-            )}
-
-            {/* Test credentials hint (remove when connecting to the database) */}
-            {role === "teacher" && (
-              <p className="text-xs text-center" style={{ color: C.muted }}>
-                Test: teacher@test.com / teacher123
               </p>
             )}
 

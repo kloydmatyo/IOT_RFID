@@ -44,7 +44,7 @@ export interface Log {
 
 export const EMAIL_DOMAIN = "@gordoncollege.edu.ph";
 export const STUDENT_NO_RE = /^20\d{7}$/;
-export const LATE_GRACE_MIN = 10;
+export const LATE_GRACE_MIN = 15;
 export const WEEK_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 export const MIN_TIME = "06:00";
 export const MAX_TIME = "22:00";
