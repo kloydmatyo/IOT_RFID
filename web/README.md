@@ -16,6 +16,10 @@ bun dev
 
 Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
 
+## Testing with a custom date and time
+
+On the admin or teacher dashboard, select **Set test time** beside the clock and choose a date and time. The override is saved in browser storage, published to Firebase for the RFID device, advances once per second, and is used for dashboard dates and the teacher dashboard's "today" attendance query. Select **Use real date and time** to clear it and return the device to NTP time. The ESP32 must be reflashed with the updated `RFID/RFID.ino`.
+
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.

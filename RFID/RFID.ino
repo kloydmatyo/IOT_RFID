@@ -62,6 +62,7 @@
 #define HEARTBEAT_INTERVAL    30000   // 30 seconds
 #define AUTH_SYNC_INTERVAL    60000   // 1 minute
 #define SESSION_SYNC_INTERVAL 10000   // 10 seconds – check for active class session
+#define TEST_CLOCK_SYNC_INTERVAL 5000 // 5 seconds – check for browser test clock
 #define NTP_RETRY_INTERVAL    5000    // 5 seconds
 #define SCAN_COOLDOWN         2000    // prevent duplicate scans
 
@@ -85,7 +86,11 @@ bool timeReady     = false;
 unsigned long lastHeartbeat    = 0;
 unsigned long lastAuthSync     = 0;
 unsigned long lastSessionSync  = 0;
+unsigned long lastTestClockSync = 0;
 unsigned long lastScanTime     = 0;
+bool testClockEnabled          = false;
+unsigned long long testClockBaseMs = 0;
+unsigned long testClockSetAtMillis = 0;
 
 // ─── Authorized UIDs cache (for admin /accessLogs path) ──────────────────────
 #define MAX_AUTHORIZED 20
@@ -156,14 +161,23 @@ String uidPlain(byte *uid, byte size) {
   return result;
 }
 
+unsigned long long getCurrentEpochMs() {
+  if (testClockEnabled) {
+    return testClockBaseMs + (unsigned long)(millis() - testClockSetAtMillis);
+  }
+  if (!timeReady) return 0;
+  struct timeval tv;
+  gettimeofday(&tv, nullptr);
+  return (unsigned long long)tv.tv_sec * 1000ULL + tv.tv_usec / 1000ULL;
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Utility: Get current ISO8601 timestamp (UTC)
 // ────────────────────────────────────────────────────────────────────────────
 String getTimestamp() {
-  if (!timeReady) return "1970-01-01T00:00:00Z";
-  time_t now;
+  if (!timeReady && !testClockEnabled) return "1970-01-01T00:00:00Z";
+  time_t now = (time_t)(getCurrentEpochMs() / 1000ULL);
   struct tm timeinfo;
-  time(&now);
   gmtime_r(&now, &timeinfo);
   char buf[30];
   strftime(buf, sizeof(buf), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
@@ -172,8 +186,8 @@ String getTimestamp() {
 
 // Returns "YYYY-MM-DD" in local time (UTC+8 baked into configTime)
 String getLocalDatePH() {
-  if (!timeReady) return "1970-01-01";
-  time_t now = time(nullptr);
+  if (!timeReady && !testClockEnabled) return "1970-01-01";
+  time_t now = (time_t)(getCurrentEpochMs() / 1000ULL);
   struct tm ti;
   localtime_r(&now, &ti);
   char buf[12];
@@ -183,8 +197,8 @@ String getLocalDatePH() {
 
 // Returns current minutes-since-midnight in local time
 int getLocalMinutesPH() {
-  if (!timeReady) return 0;
-  time_t now = time(nullptr);
+  if (!timeReady && !testClockEnabled) return 0;
+  time_t now = (time_t)(getCurrentEpochMs() / 1000ULL);
   struct tm ti;
   localtime_r(&now, &ti);
   return ti.tm_hour * 60 + ti.tm_min;
@@ -192,11 +206,7 @@ int getLocalMinutesPH() {
 
 // Returns epoch milliseconds as String
 String getEpochMs() {
-  if (!timeReady) return "0";
-  struct timeval tv;
-  gettimeofday(&tv, nullptr);
-  unsigned long long ms = (unsigned long long)tv.tv_sec * 1000ULL + tv.tv_usec / 1000ULL;
-  return String(ms);
+  return String(getCurrentEpochMs());
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -386,6 +396,35 @@ void syncActiveSession() {
   currentSession.classStart = classStartData.success ? classStartData.stringValue : "";
 
   Serial.println("Active session: " + currentSession.className + " / " + currentSession.classKey);
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Sync browser test clock from Firebase
+// ────────────────────────────────────────────────────────────────────────────
+void syncTestClock() {
+  if (!firebaseReady || WiFi.status() != WL_CONNECTED) return;
+
+  if (!Firebase.getJSON(fbData, "/settings/testClock")) return;
+
+  FirebaseJson &json = fbData.jsonObject();
+  FirebaseJsonData enabledData, epochData;
+  json.get(enabledData, "enabled");
+  json.get(epochData, "epochMs");
+
+  bool enabled = enabledData.success && enabledData.boolValue;
+  if (!enabled || !epochData.success) {
+    if (testClockEnabled) Serial.println("Test clock disabled; using NTP time.");
+    testClockEnabled = false;
+    return;
+  }
+
+  unsigned long long configuredMs = (unsigned long long)epochData.doubleValue;
+  if (!testClockEnabled || configuredMs != testClockBaseMs) {
+    testClockBaseMs = configuredMs;
+    testClockSetAtMillis = millis();
+    testClockEnabled = true;
+    Serial.println("Test clock enabled: " + String((unsigned long)(configuredMs / 1000ULL)));
+  }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -648,6 +687,7 @@ void setup() {
     initFirebase();
     syncAuthorizedUIDs();
     syncActiveSession();
+    syncTestClock();
     sendHeartbeat();
   } else {
     authorizedUIDs[authorizedCount++] = FALLBACK_UID;
@@ -695,6 +735,11 @@ void loop() {
     }
   }
 
+  if (now - lastTestClockSync >= TEST_CLOCK_SYNC_INTERVAL) {
+    lastTestClockSync = now;
+    syncTestClock();
+  }
+
   // WiFi reconnect
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi lost – reconnecting...");
@@ -720,11 +765,7 @@ void loop() {
   String timestamp    = getTimestamp();
   String date         = getLocalDatePH();
   unsigned long long epochMs = 0;
-  {
-    struct timeval tv;
-    gettimeofday(&tv, nullptr);
-    epochMs = (unsigned long long)tv.tv_sec * 1000ULL + tv.tv_usec / 1000ULL;
-  }
+  epochMs = getCurrentEpochMs();
 
   Serial.println("Card: " + uidFormatted + " (plain: " + uidPlainStr + ")");
 

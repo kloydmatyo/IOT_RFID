@@ -63,6 +63,8 @@ import {
   EMAIL_DOMAIN,
 } from "@/lib/teacher";
 import type { StatusFilter, Tab } from "@/lib/teacher";
+import { useTestClock } from "@/context/TestClockContext";
+import TestClockControl from "@/components/TestClockControl";
 import type { ClassRecord, StudentRecord, AttendanceRecord } from "@/lib/types";
 import Pagination from "@/components/teacher/Pagination";
 import {
@@ -123,7 +125,8 @@ export default function TeacherPage() {
   const { students, loading: studentsLoading, addStudent, updateStudent, deleteStudent } = useStudents(teacherUid);
   const { session: activeSession, startSession, stopSession } = useActiveSession();
 
-  const today = toISODate(new Date());
+  const { now: testNow } = useTestClock();
+  const today = toISODate(testNow ?? new Date());
   const activeClasses  = useMemo(() => classes.filter(c => !c.archived), [classes]);
   const activeStudents = useMemo(() => students.filter(s => !s.archived), [students]);
   const archivedClasses  = useMemo(() => classes.filter(c => c.archived), [classes]);
@@ -149,7 +152,6 @@ export default function TeacherPage() {
   /* ── UI state ── */
   const [collapsed, setCollapsed] = useState(false);
   const [tab, setTab] = useState<Tab>("dashboard");
-  const [now, setNow] = useState<Date | null>(null);
   const [toast, setToast] = useState<{ msg: string; kind: "success" | "archive" | "delete" | "error" } | null>(null);
   const notify = useCallback((msg: string, kind: "success" | "archive" | "delete" | "error" = "success") => setToast({ msg, kind }), []);
 
@@ -233,13 +235,6 @@ export default function TeacherPage() {
 
   // active session UI
   const [sessionSaving, setSessionSaving] = useState(false);
-
-  /* ── live clock ── */
-  useEffect(() => {
-    setNow(new Date());
-    const t = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(t);
-  }, []);
 
   /* ── start collapsed on small screens ── */
   useEffect(() => {
@@ -740,8 +735,8 @@ export default function TeacherPage() {
   const arcStuPaged = paginate(shownArchivedStudents, arcStuPage);
   const arcClsPaged = paginate(shownArchivedClasses, arcClsPage);
 
-  const timeText = now ? now.toLocaleTimeString("en-PH", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true }) : "--:--:--";
-  const dateText = now ? now.toLocaleDateString("en-PH", { weekday: "long", month: "long", day: "numeric", year: "numeric" }) : "";
+  const timeText = testNow ? testNow.toLocaleTimeString("en-PH", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true }) : "--:--:--";
+  const dateText = testNow ? testNow.toLocaleDateString("en-PH", { weekday: "long", month: "long", day: "numeric", year: "numeric" }) : "";
   const initial  = (teacher.name?.trim()[0] ?? "T").toUpperCase();
 
   const chips: { id: StatusFilter; label: string; color?: string }[] = [
@@ -946,12 +941,15 @@ export default function TeacherPage() {
             </div>
             <div className="flex items-center gap-3">
               {tab === "dashboard" && (
-                <div className="flex items-center gap-3 rounded-xl px-4 py-2.5" style={{ background: C.surface, border: `1px solid ${C.border}` }}>
-                  <Clock className="w-5 h-5" style={{ color: C.green }} />
-                  <div className="leading-tight">
-                    <p className="text-base font-semibold tabular-nums" style={{ color: C.text }}>{timeText}</p>
-                    <p className="text-[11px]" style={{ color: C.muted }}>{dateText}</p>
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-3 rounded-xl px-4 py-2.5" style={{ background: C.surface, border: `1px solid ${C.border}` }}>
+                    <Clock className="w-5 h-5" style={{ color: C.green }} />
+                    <div className="leading-tight">
+                      <p className="text-base font-semibold tabular-nums" style={{ color: C.text }}>{timeText}</p>
+                      <p className="text-[11px]" style={{ color: C.muted }}>{dateText}</p>
+                    </div>
                   </div>
+                  <TestClockControl />
                 </div>
               )}
               {tab === "classes" && !openClassId && (

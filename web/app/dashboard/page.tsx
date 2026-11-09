@@ -7,6 +7,8 @@ import type { Chart as ChartInstance } from "chart.js";
 import { useStats, useCards, useRecentLogs, useLogs } from "@/hooks/useFirebase";
 import { formatTime } from "@/lib/utils";
 import { subDays, format, parseISO, isValid } from "date-fns";
+import { useTestClock } from "@/context/TestClockContext";
+import TestClockControl from "@/components/TestClockControl";
 
 /* Palette shared with the teacher side */
 const C = {
@@ -53,20 +55,16 @@ export default function DashboardPage() {
   const lineRef = useRef<HTMLCanvasElement>(null);
   const donutChart = useRef<ChartInstance | null>(null);
   const lineChart = useRef<ChartInstance | null>(null);
-  const [now, setNow] = useState<Date | null>(null);
+  const { now } = useTestClock();
   const [authorizedVisible, setAuthorizedVisible] = useState(true);
   const [unauthorizedVisible, setUnauthorizedVisible] = useState(true);
+  const chartDateKey = now
+    ? `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`
+    : "";
 
   const total = stats.authorizedCount + stats.unauthorizedCount;
   const authPct = total ? Math.round((stats.authorizedCount / total) * 100) : 0;
   const unauthPct = total ? 100 - authPct : 0;
-
-  /* ---- live clock ---- */
-  useEffect(() => {
-    setNow(new Date());
-    const t = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(t);
-  }, []);
 
   /* ---- donut chart ---- */
   useEffect(() => {
@@ -115,7 +113,8 @@ export default function DashboardPage() {
     if (!lineRef.current) return;
     let cancelled = false;
 
-    const labels = Array.from({ length: 7 }, (_, i) => format(subDays(new Date(), 6 - i), "MMM d"));
+    const chartDate = chartDateKey ? new Date(`${chartDateKey}T12:00:00`) : new Date();
+    const labels = Array.from({ length: 7 }, (_, i) => format(subDays(chartDate, 6 - i), "MMM d"));
     const auth: number[] = new Array(7).fill(0);
     const unauth: number[] = new Array(7).fill(0);
 
@@ -128,7 +127,7 @@ export default function DashboardPage() {
           label = format(d, "MMM d");
         } else {
           // No timestamp: bucket into today
-          label = format(new Date(), "MMM d");
+          label = format(chartDate, "MMM d");
         }
         const idx = labels.indexOf(label);
         if (idx === -1) return;
@@ -204,7 +203,7 @@ export default function DashboardPage() {
       lineChart.current?.destroy();
       lineChart.current = null;
     };
-  }, [allLogs, authorizedVisible, unauthorizedVisible]);
+  }, [allLogs, authorizedVisible, unauthorizedVisible, chartDateKey]);
 
   const timeText = now
     ? now.toLocaleTimeString("en-PH", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: true })
@@ -228,15 +227,18 @@ export default function DashboardPage() {
               <h1 className="text-2xl font-bold" style={{ color: C.text }}>Dashboard</h1>
               <p className="text-sm mt-1" style={{ color: C.muted }}>Overview of RFID card scans and access activity.</p>
             </div>
-            <div
-              className="flex items-center gap-3 rounded-xl px-4 py-2.5"
-              style={{ background: C.surface, border: `1px solid ${C.border}` }}
-            >
-              <Clock className="w-5 h-5" style={{ color: C.green }} />
-              <div className="leading-tight">
-                <p className="text-base font-semibold tabular-nums" style={{ color: C.text }}>{timeText}</p>
-                <p className="text-[11px]" style={{ color: C.muted }}>{dateText}</p>
+            <div className="flex items-center gap-2">
+              <div
+                className="flex items-center gap-3 rounded-xl px-4 py-2.5"
+                style={{ background: C.surface, border: `1px solid ${C.border}` }}
+              >
+                <Clock className="w-5 h-5" style={{ color: C.green }} />
+                <div className="leading-tight">
+                  <p className="text-base font-semibold tabular-nums" style={{ color: C.text }}>{timeText}</p>
+                  <p className="text-[11px]" style={{ color: C.muted }}>{dateText}</p>
+                </div>
               </div>
+              <TestClockControl />
             </div>
           </div>
 
